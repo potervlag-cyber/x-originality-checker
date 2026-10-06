@@ -1,0 +1,16 @@
+# Generated runtime and Pages artifact; Actions downloads pinned, verified files.
+/vendor/
+/_site/
+/pages-preview/
+
+# Local QA, generated reports, material projects, and synchronization staging.
+/qa/
+/.obsidian-sync*/
+/*.html
+/*-project.json
+/*-report.md
+/*-candidates.txt
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db

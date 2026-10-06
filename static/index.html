@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>原作 · X 原创评估</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./runtime.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">原</div><div><strong>原作</strong><span>X 原创评估 · v0.1</span></div></div>
+    <div class="eyebrow">工作空间</div>
+    <nav aria-label="主要导航">
+      <button class="nav-item active" data-view="overview"><span>◫</span>评估概览</button>
+      <button class="nav-item" data-view="materials"><span>↓</span>导入与资料</button>
+      <button class="nav-item" data-view="posts"><span>≡</span>帖子与证据 <small id="nav-count">0</small></button>
+      <button class="nav-item" data-view="candidates"><span>☆</span>申请候选</button>
+      <button class="nav-item" data-view="report"><span>↗</span>导出报告</button>
+    </nav>
+    <div class="sidebar-note"><span class="connection-dot"></span><strong id="runtime-title">本机运行</strong><p id="runtime-note">材料仅在本机处理。退出前保存项目，下次可继续。</p><div class="muted" id="connection-state">正在连接…</div><button class="button ghost small" id="shutdown">停止本机服务</button></div>
+  </aside>
+  <main class="workspace">
+    <header class="topbar">
+      <div><div class="eyebrow">ORIGINALITY WORKSPACE</div><h1 class="page-title" id="page-title">评估概览</h1></div>
+      <div class="topbar-actions"><span class="tag" id="project-state">未导入材料</span><button class="button secondary" id="save-project">保存项目</button><button class="button primary" id="analyze">运行评估 <span>→</span></button></div>
+    </header>
+
+    <section class="view active" id="view-overview">
+      <div class="hero"><div class="hero-text"><div class="eyebrow">从作品到证据</div><h2>看清原创风险，<br>准备更充分的申请。</h2><p>对比你提供的帖子与来源，整理重复内容、原创贡献和材料缺口。每项判断都有理由，便于逐条复核。</p><div class="hero-actions"><button class="button primary" data-go="materials">导入账号材料 →</button><button class="button secondary" id="load-demo">体验示例</button></div></div><div class="hero-visual" aria-hidden="true"><div class="paper-back"></div><div class="paper-front"><span class="eyebrow">EVIDENCE FIRST</span><div class="paper-line long"></div><div class="paper-line"></div><div class="paper-line short"></div><div class="paper-divider"></div><div class="paper-check">✓ <span>内容对比</span></div><div class="paper-check">✓ <span>原创贡献</span></div><div class="paper-check">✓ <span>材料完整性</span></div><div class="paper-stamp">原</div></div></div></div>
+      <div class="metrics" id="metrics"></div>
+      <div class="two-column"><div class="panel"><div class="panel-header"><h2 class="panel-title">当前评估范围</h2><button class="button ghost small" data-go="materials">编辑资料 ↗</button></div><div id="coverage-overview" class="panel-content"></div></div><div class="panel"><div class="panel-header"><h2 class="panel-title">优先处理</h2><span class="muted">按证据逐条复核</span></div><div id="priority-list" class="panel-content"></div></div></div>
+      <div class="notice"><strong>结果边界</strong><span>第一版检查账号内部重复、已提供来源文本和文件哈希。语义改写、图片／视频内容理解、全网检索及官方审核一致性尚未验证。</span></div>
+    </section>
+
+    <section class="view" id="view-materials">
+      <div class="panel"><div class="panel-header"><div><h2 class="panel-title">导入帖子材料</h2><p class="muted">先导入内容，再补充出处和创作证据。</p></div><button class="button ghost" id="download-template">下载提交表</button></div>
+        <div class="import-zone" id="drop-zone" tabindex="0" role="button" aria-label="选择帖子材料文件"><div class="upload-mark">↓</div><h3>拖入文件，或点击选择</h3><p>JSON · CSV · Markdown 提交表 · X 帖子 JS · 筛选后的 ZIP</p><span class="muted">单文件 ≤ 30 MB · 第一版最多 2,000 条 · 媒体在单篇详情中关联</span></div>
+        <input type="file" id="file-input" accept=".json,.csv,.md,.txt,.js,.zip" multiple hidden>
+        <div class="import-options"><label><input type="checkbox" id="import-append" checked> 追加到当前材料</label><button class="button secondary" id="add-post">手动添加帖子</button><button class="button ghost" id="paste-links">登记帖子链接</button><button class="button ghost" id="show-guide">查看提交说明</button></div>
+        <div class="notice warning"><strong>整理归档后再导入</strong><span>请在本机筛选相关公开帖子。ZIP 只读取允许的帖子文件，跳过账户和私信数据；材料无法读取时会显示原因。</span></div><div id="import-feedback" class="panel-content" aria-live="polite"></div>
+      </div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">账号与评估范围</h2><span class="muted">编辑后需重新评估</span></div><form id="scope-form" class="field-grid">
+        <label class="field full">账号链接或 @用户名<input class="form-control" id="account" placeholder="https://x.com/username 或 @username"></label>
+        <label class="field">评估目的<select class="form-control" id="scope-selection"><option value="full_period">指定时间段账号评估</option><option value="sample">申请样本初评</option><option value="partial">部分材料初评</option></select></label>
+        <label class="field">材料完整性<select class="form-control" id="scope-complete"><option value="unknown">不确定</option><option value="yes">本人声明：已提供范围内全部帖子</option><option value="no">只提供部分帖子</option></select></label>
+        <label class="field">开始日期<input class="form-control" type="date" id="scope-start"></label><label class="field">结束日期<input class="form-control" type="date" id="scope-end"></label>
+        <label class="field">时区<select class="form-control" id="scope-timezone"><option value="Asia/Shanghai">北京时间 · UTC+8</option><option value="UTC">UTC</option></select></label><label class="field">范围内总帖数（已知时填）<input class="form-control" type="number" id="scope-total" min="0" max="10000000" placeholder="未知可留空"></label>
+        <label class="field full">已知缺失<textarea class="form-control" id="scope-missing" rows="2" placeholder="例如：三篇视频缺失；部分线程只有第一条"></textarea></label>
+        <div class="field full"><p class="muted">留空日期会分析全部已导入材料。设置日期后，仅分析范围内帖子；时间未知的内容单独标记。所选窗口是你的分析范围，不是官方审核窗口。</p><button class="button secondary" type="submit">保存账号资料</button></div>
+      </form></div>
+    </section>
+
+    <section class="view" id="view-posts">
+      <div class="panel"><div class="panel-header"><div><h2 class="panel-title">帖子与对比证据</h2><p class="muted" id="posts-description">点击帖子，补充来源与本人贡献。</p></div><button class="button secondary" id="add-post-second">添加帖子</button></div><div class="posts-toolbar"><input class="form-control" id="post-search" placeholder="搜索正文、链接或编号" aria-label="搜索帖子"><select class="form-control" id="post-filter" aria-label="筛选风险"><option value="all">全部帖子</option><option value="high_risk">高风险</option><option value="review">需复核</option><option value="insufficient">材料不足</option><option value="low_signal">未发现明显文本风险</option></select></div><div class="two-column posts-split"><div class="post-list" id="post-list"></div><div class="detail-panel" id="post-detail"></div></div></div>
+    </section>
+
+    <section class="view" id="view-candidates">
+      <div class="panel"><div class="panel-header"><div><h2 class="panel-title">申请候选</h2><p class="muted">从已评估材料中选最多 10 篇；候选排序不等于官方评分。</p></div><span class="tag" id="selected-count">已选 0 / 10</span></div><div class="notice"><strong>以完整证据为先</strong><span>推荐考虑文本风险、本人贡献和材料完整性。回复与普通转帖默认不推荐；这是本工具的候选策略。线程按组只推荐一个入口，仍需提交完整内容。</span></div><div id="candidate-list" class="panel-content"></div><div class="panel-footer"><button class="button secondary" id="select-recommended">选择当前推荐</button><button class="button ghost" id="export-candidates">导出已选链接</button></div></div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">已选材料复核</h2></div><div id="selected-review" class="panel-content"></div></div>
+    </section>
+
+    <section class="view" id="view-report">
+      <div class="panel"><div class="panel-header"><div><h2 class="panel-title">保存成果</h2><p class="muted">保存项目可以继续编辑；报告包含逐帖理由、覆盖范围和局限。</p></div></div><div class="export-grid"><div class="export-card"><span class="export-symbol">{ }</span><h3>项目文件</h3><p>保留帖子、来源、媒体哈希和所选候选。重新导入即可恢复。</p><button class="button secondary" id="export-project">保存 JSON 项目</button></div><div class="export-card"><span class="export-symbol">Aa</span><h3>可阅读报告</h3><p>独立 HTML 文件，可在浏览器阅读或打印。导出内容来自最新材料。</p><button class="button primary" id="export-html">导出 HTML 报告</button></div><div class="export-card"><span class="export-symbol">M↓</span><h3>知识库报告</h3><p>Markdown 格式，便于归档到 Obsidian 或交给评估者复核。</p><button class="button secondary" id="export-md">导出 Markdown</button></div></div><div class="notice warning"><strong>注意材料范围</strong><span>导出的项目和报告包含帖子与来源原文。分享前检查内容；媒体只保存关联信息及哈希，原文件需另外保留。</span></div></div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">第一版能检查什么</h2></div><div class="capability-grid"><div><h3>已提供材料内</h3><p>完全／近似重复文本、来源文字重合、实际文件哈希重复、反复诱导互动的风险提示、线程与媒体缺口。</p></div><div><h3>需要后续验证</h3><p>语义洗稿、跨语言来源识别、图片／视频原创理解、全网来源检索、官方审核结果的拟合与校准。</p></div></div><div class="panel-footer"><a href="https://help.x.com/en/using-x/original-content-rewards" target="_blank" rel="noreferrer">查看 X 官方原创内容规则 ↗</a><button class="button ghost danger" id="reset-project">清空当前项目</button></div></div>
+    </section>
+  </main>
+</div>
+
+<dialog class="modal" id="post-modal"><form id="post-form"><div class="modal-header"><div><div class="eyebrow">POST & EVIDENCE</div><h2 id="post-modal-title">添加帖子</h2></div><button class="button ghost" type="button" data-close="post-modal" aria-label="关闭">✕</button></div><div class="modal-body field-grid">
+  <input type="hidden" id="edit-id">
+  <label class="field">帖子编号<input class="form-control" id="edit-post-id" required maxlength="100" placeholder="P001"></label><label class="field">帖子类型<select class="form-control" id="edit-type"><option value="original">主帖</option><option value="quote">引用帖</option><option value="reply">回复</option><option value="article">Article 长文</option><option value="repost">普通转帖</option></select></label>
+  <label class="field full">帖子链接<input class="form-control" id="edit-url" placeholder="https://x.com/username/status/…" maxlength="2000"></label>
+  <label class="field full">发布时间（含时区）<input class="form-control" id="edit-created" placeholder="2026-10-06T12:00:00+08:00；未知可留空"></label>
+  <label class="field full">完整正文<textarea class="form-control" id="edit-text" rows="6" placeholder="保留原文。引用帖请填本人新增的文字，原来源在下方填写。"></textarea></label>
+  <label class="field">正文完整性<select class="form-control" id="edit-text-complete"><option value="yes">完整</option><option value="no">缺少部分内容</option><option value="unknown">不确定</option></select></label><label class="field">创作方式<select class="form-control" id="edit-method"><option value="">未说明</option><option value="manual">本人创作</option><option value="assisted">工具辅助</option><option value="automated">自动生成或自动发布</option><option value="unknown">不确定</option></select></label>
+  <label class="field">线程编号（可选）<input class="form-control" id="edit-thread" placeholder="同一线程填相同编号"></label><label class="field">线程完整性<select class="form-control" id="edit-thread-complete"><option value="yes">完整／非线程</option><option value="no">线程缺少分段</option><option value="unknown">不确定</option></select></label>
+  <label class="field full">本人新增的观点、分析或创作<textarea class="form-control" id="edit-contribution" rows="3" placeholder="指出新增内容；仅作者声明会保留为待核实。"></textarea></label>
+  <label class="field full">创作证据（每行一项）<textarea class="form-control" id="edit-evidence" rows="2" placeholder="例如：草稿文件名、本人首发链接、拍摄原文件说明"></textarea></label>
+  <div class="field full detail-section"><div class="panel-header"><h3>来源对比</h3><button class="button secondary small" type="button" id="add-source">添加来源</button></div><p class="muted">提供来源原文才能进行文本对比。来源链接仅作记录，第一版不会自动抓取网页。</p><div id="source-editors"></div></div>
+  <div class="field full detail-section"><div class="panel-header"><h3>关联媒体</h3><button class="button secondary small" type="button" id="attach-media">选择文件</button></div><input type="file" id="media-input" accept="image/*,video/*,.gif" multiple hidden><div id="media-editors"></div><p class="muted">文件在浏览器内计算 SHA-256；只记录文件名、类型和哈希。第一版不理解图片／视频画面。</p></div>
+  <label class="field full">备注<textarea class="form-control" id="edit-notes" rows="2"></textarea></label>
+  <p class="field full muted" id="edit-error" role="alert"></p>
+</div><div class="modal-footer"><button class="button ghost danger" id="delete-post" type="button">移除这篇</button><button class="button secondary" type="button" data-close="post-modal">取消</button><button class="button primary" type="submit">保存帖子</button></div></form></dialog>
+
+<dialog class="modal" id="links-modal"><form id="links-form"><div class="modal-header"><h2>登记帖子链接</h2><button class="button ghost" type="button" data-close="links-modal">✕</button></div><div class="modal-body"><p class="muted">每行一个 X 帖子链接。这里只登记，正文和媒体需后续补充；不会自动读取账号。</p><textarea class="form-control" id="links-text" rows="8" placeholder="https://x.com/username/status/…"></textarea></div><div class="modal-footer"><button class="button secondary" type="button" data-close="links-modal">取消</button><button class="button primary" type="submit">登记链接</button></div></form></dialog>
+<dialog class="modal" id="guide-modal"><div class="modal-header"><h2>材料提交说明</h2><button class="button ghost" data-close="guide-modal">✕</button></div><div class="modal-body"><pre id="guide-text" class="guide-content"></pre></div></dialog>
+<dialog class="modal" id="confirm-modal"><form id="confirm-form"><div class="modal-header"><h2 id="confirm-title">确认操作</h2></div><div class="modal-body"><p id="confirm-message"></p></div><div class="modal-footer"><button class="button secondary" type="button" data-close="confirm-modal">取消</button><button class="button primary" type="submit">继续</button></div></form></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
