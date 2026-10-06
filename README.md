@@ -2,7 +2,7 @@
 
 中文 GUI，用于检查已提供帖子材料中的原创风险、补齐证据，并整理最多 10 篇申请候选。
 
-**预计发布地址：<https://potervlag-cyber.github.io/x-originality-checker/>**
+**访问地址：<https://potervlag-cyber.github.io/x-originality-checker/>**
 
 打开页面即可使用，无需安装 Python 或登录 X。首次运行会从本站下载约 14 MB 的浏览器 Python 运行时；初始化完成后可以点击“体验示例”。加载速度取决于网络和设备。
 
