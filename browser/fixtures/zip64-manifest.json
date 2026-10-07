@@ -1,0 +1,22 @@
+{
+  "source": "Python stdlib zipfile, fictional data only",
+  "fixtures": [
+    "zip64-stored.zip",
+    "zip64-deflate.zip",
+    "zip64-streaming.zip",
+    "zip64-local-only.zip"
+  ],
+  "posts": [
+    {
+      "name": "archive/data/tweets.js",
+      "text": "window.YTD.tweets.part0 = [{\"tweet\":{\"id_str\":\"123456789\",\"full_text\":\"ZIP64 公开帖子\"}}];"
+    },
+    {
+      "name": "archive/data/tweets-part1.js",
+      "text": "window.YTD.tweets.part1 = [{\"tweet\":{\"id_str\":\"123456790\",\"full_text\":\"第二个分片\"}}];"
+    }
+  ],
+  "media_name": "123456789-fixture.jpg",
+  "media_bytes": 48,
+  "media_sha256": "42d509e2d3aad03ef2886dd6b9c011957a1c3a265f824180c2531121b60c3ca2"
+}

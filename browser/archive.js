@@ -36,17 +36,64 @@
     } catch { throw err('ZIP 文件名编码损坏，无法读取归档。'); }
   }
 
-  function extraHasZip64(bytes) {
+  function zip64Extra(bytes) {
     const data = view(bytes);
+    let result = null;
     for (let at = 0; at < bytes.length;) {
       if (at + 4 > bytes.length) throw err('ZIP 扩展字段损坏。');
       const tag = data.getUint16(at, true), length = data.getUint16(at + 2, true);
       at += 4;
       if (at + length > bytes.length) throw err('ZIP 扩展字段损坏。');
-      if (tag === 1) return true;
+      if (tag === 1) {
+        if (result) throw err('ZIP64 扩展字段重复。');
+        result = bytes.subarray(at, at + length);
+      }
       at += length;
     }
-    return false;
+    return result;
+  }
+
+  function uint64(data, at, label) {
+    if (at + 8 > data.byteLength) throw err(`ZIP64 ${label}不完整。`);
+    const value = data.getBigUint64(at, true);
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw err(`ZIP64 ${label}超过安全整数范围。`);
+    return Number(value);
+  }
+
+  function inRange(start, length, end) {
+    return start >= 0 && start <= end && length >= 0 && length <= end - start;
+  }
+
+  function directoryValues(bytes, values) {
+    const extra = zip64Extra(bytes);
+    if (values.size !== 0xffffffff && values.compressedSize !== 0xffffffff &&
+        values.localAt !== 0xffffffff && values.startDisk !== 0xffff) return values;
+    if (!extra) throw err('ZIP64 目录缺少大小或偏移扩展字段。');
+    const data = view(extra);
+    let at = 0;
+    // The extra contains only the fields whose classic values are sentinels,
+    // in this order. An offset-only extra starts with the offset, not a size.
+    for (const key of ['size', 'compressedSize', 'localAt']) {
+      if (values[key] === 0xffffffff) {
+        values[key] = uint64(data, at, '目录扩展字段');
+        at += 8;
+      }
+    }
+    if (values.startDisk === 0xffff) {
+      if (at + 4 > data.byteLength) throw err('ZIP64 分卷扩展字段不完整。');
+      values.startDisk = data.getUint32(at, true);
+    }
+    return values;
+  }
+
+  function localValues(bytes, size, compressedSize) {
+    const extra = zip64Extra(bytes);
+    if (size !== 0xffffffff && compressedSize !== 0xffffffff) return {size, compressedSize};
+    if (!extra || extra.length < 16) throw err('ZIP64 文件头缺少大小扩展字段。');
+    // Unlike the central directory, a ZIP64 local header carries both sizes.
+    const data = view(extra), expanded = uint64(data, 0, '文件头大小'), compressed = uint64(data, 8, '文件头大小');
+    return {size: size === 0xffffffff ? expanded : size,
+      compressedSize: compressedSize === 0xffffffff ? compressed : compressedSize};
   }
 
   async function open(file, options = {}) {
@@ -57,7 +104,7 @@
     // X usually has no ZIP comment: read only the 22-byte footer first.
     let tailStart = file.size - 22;
     let tail = new Uint8Array(await file.slice(tailStart).arrayBuffer());
-    if (view(tail).getUint32(0, true) !== 0x06054b50 || view(tail).getUint16(20, true) !== 0) {
+    if (tail.length !== 22 || view(tail).getUint32(0, true) !== 0x06054b50 || view(tail).getUint16(20, true) !== 0) {
       tailStart = Math.max(0, file.size - 65557);
       tail = new Uint8Array(await file.slice(tailStart).arrayBuffer());
     }
@@ -67,14 +114,50 @@
       if (tailView.getUint32(at, true) === 0x06054b50 && at + 22 + tailView.getUint16(at + 20, true) === tail.length) { endAt = at; break; }
     }
     if (endAt < 0) throw err('找不到 ZIP 完整目录。文件可能损坏、尚未下载完成或不是 ZIP。');
-    if (endAt >= 20 && tailView.getUint32(endAt - 20, true) === 0x07064b50) throw err('暂不支持 ZIP64 归档；请使用普通 ZIP 格式。');
+    const endOffset = tailStart + endAt;
     const disk = tailView.getUint16(endAt + 4, true), directoryDisk = tailView.getUint16(endAt + 6, true);
-    const diskEntries = tailView.getUint16(endAt + 8, true), entryCount = tailView.getUint16(endAt + 10, true);
-    const directoryBytes = tailView.getUint32(endAt + 12, true), directoryAt = tailView.getUint32(endAt + 16, true);
-    if (disk || directoryDisk || diskEntries !== entryCount) throw err('暂不支持分卷 ZIP。请选择完整的单个 ZIP 文件。');
-    if (entryCount === 0xffff || directoryBytes === 0xffffffff || directoryAt === 0xffffffff) throw err('暂不支持 ZIP64 归档；请使用普通 ZIP 格式。');
+    let diskEntries = tailView.getUint16(endAt + 8, true), entryCount = tailView.getUint16(endAt + 10, true);
+    let directoryBytes = tailView.getUint32(endAt + 12, true), directoryAt = tailView.getUint32(endAt + 16, true);
+    let directoryEnd = endOffset;
+    // Read the locator by absolute position, including on the 22-byte fast
+    // path. Forced ZIP64 writers may keep every classic EOCD value in range.
+    const locatorAt = endOffset - 20;
+    const locatorBytes = locatorAt >= 0 ? new Uint8Array(await file.slice(locatorAt, endOffset).arrayBuffer()) : new Uint8Array();
+    // A signature inside the final directory entry's comment is directory
+    // data, not a locator. A real ZIP64 directory ends before its EOCD64.
+    const classicDirectoryEndsAtEOCD = inRange(directoryAt, directoryBytes, endOffset) && directoryBytes === endOffset - directoryAt;
+    if (!classicDirectoryEndsAtEOCD && locatorBytes.length === 20 && view(locatorBytes).getUint32(0, true) === 0x07064b50) {
+      const locator = view(locatorBytes);
+      if (locator.getUint32(4, true) !== 0 || locator.getUint32(16, true) !== 1) throw err('暂不支持分卷 ZIP64。请选择完整的单个 ZIP 文件。');
+      const zip64At = uint64(locator, 8, '目录结束记录偏移');
+      if (!inRange(zip64At, 56, locatorAt)) throw err('ZIP64 目录结束记录偏移超出范围或记录不完整。');
+      const recordBytes = new Uint8Array(await file.slice(zip64At, zip64At + 56).arrayBuffer());
+      const record = view(recordBytes);
+      if (recordBytes.length !== 56 || record.getUint32(0, true) !== 0x06064b50) throw err('ZIP64 目录结束记录损坏。');
+      const recordSize = uint64(record, 4, '目录结束记录长度');
+      if (recordSize < 44 || recordSize !== locatorAt - zip64At - 12) throw err('ZIP64 目录结束记录长度或偏移不一致。');
+      const zip64Disk = record.getUint32(16, true), zip64DirectoryDisk = record.getUint32(20, true);
+      const zip64DiskEntries = uint64(record, 24, '分卷文件数'), zip64Entries = uint64(record, 32, '文件数');
+      const zip64DirectoryBytes = uint64(record, 40, '目录长度'), zip64DirectoryAt = uint64(record, 48, '目录偏移');
+      if (zip64Disk || zip64DirectoryDisk || zip64DiskEntries !== zip64Entries ||
+          (disk !== 0 && disk !== 0xffff) || (directoryDisk !== 0 && directoryDisk !== 0xffff)) throw err('暂不支持分卷 ZIP64。请选择完整的单个 ZIP 文件。');
+      if ((diskEntries !== 0xffff && diskEntries !== zip64DiskEntries) ||
+          (entryCount !== 0xffff && entryCount !== zip64Entries) ||
+          (directoryBytes !== 0xffffffff && directoryBytes !== zip64DirectoryBytes) ||
+          (directoryAt !== 0xffffffff && directoryAt !== zip64DirectoryAt)) throw err('ZIP64 目录与普通目录结束记录不一致。');
+      diskEntries = zip64DiskEntries;
+      entryCount = zip64Entries;
+      directoryBytes = zip64DirectoryBytes;
+      directoryAt = zip64DirectoryAt;
+      directoryEnd = zip64At;
+    } else {
+      if (disk || directoryDisk || diskEntries !== entryCount) throw err('暂不支持分卷 ZIP。请选择完整的单个 ZIP 文件。');
+      if (directoryBytes === 0xffffffff || directoryAt === 0xffffffff) throw err('ZIP64 缺少目录定位记录。');
+      // A classic ZIP may have exactly 65,535 entries without a ZIP64 footer.
+      // Its count and complete directory are validated below.
+    }
     if (entryCount > MAX_ENTRIES || directoryBytes > MAX_DIRECTORY_BYTES) throw err('ZIP 目录过大，超过浏览器安全处理范围。');
-    if (directoryAt + directoryBytes !== tailStart + endAt) throw err('ZIP 目录偏移不一致，文件可能损坏。');
+    if (!inRange(directoryAt, directoryBytes, directoryEnd) || directoryBytes !== directoryEnd - directoryAt) throw err('ZIP 目录偏移不一致，文件可能损坏。');
     const directory = new Uint8Array(await file.slice(directoryAt, directoryAt + directoryBytes).arrayBuffer());
     if (directory.length !== directoryBytes) throw err('ZIP 目录不完整。');
     const data = view(directory), entries = [], seen = new Set();
@@ -82,19 +165,21 @@
     for (let index = 0; index < entryCount; index++) {
       if (at + 46 > directory.length || data.getUint32(at, true) !== 0x02014b50) throw err('ZIP 目录记录损坏。');
       const flags = data.getUint16(at + 8, true), method = data.getUint16(at + 10, true);
-      const crc = data.getUint32(at + 16, true), compressedSize = data.getUint32(at + 20, true), size = data.getUint32(at + 24, true);
+      const crc = data.getUint32(at + 16, true);
       const nameBytes = data.getUint16(at + 28, true), extraBytes = data.getUint16(at + 30, true), commentBytes = data.getUint16(at + 32, true);
-      const startDisk = data.getUint16(at + 34, true), localAt = data.getUint32(at + 42, true);
       const next = at + 46 + nameBytes + extraBytes + commentBytes;
       if (next > directory.length || nameBytes === 0) throw err('ZIP 目录记录不完整。');
+      const {size, compressedSize, localAt, startDisk} = directoryValues(
+        directory.subarray(at + 46 + nameBytes, at + 46 + nameBytes + extraBytes),
+        {size: data.getUint32(at + 24, true), compressedSize: data.getUint32(at + 20, true),
+          localAt: data.getUint32(at + 42, true), startDisk: data.getUint16(at + 34, true)});
       const rawName = directory.slice(at + 46, at + 46 + nameBytes);
       const name = decodeName(rawName, flags);
       if (name.includes('\\') || name.startsWith('/') || name.includes('\0') || name.split('/').some(part => part === '..') || /^[a-z]:/i.test(name)) throw err('ZIP 包含无效路径，已停止处理。');
       if (seen.has(name)) throw err('ZIP 含有重名文件，无法可靠判断归档内容。');
       seen.add(name);
       if (startDisk) throw err('暂不支持分卷 ZIP。');
-      if (size === 0xffffffff || compressedSize === 0xffffffff || localAt === 0xffffffff || extraHasZip64(directory.subarray(at + 46 + nameBytes, at + 46 + nameBytes + extraBytes))) throw err('暂不支持 ZIP64 归档；请使用普通 ZIP 格式。');
-      if (localAt + 30 + compressedSize > directoryAt) throw err('ZIP 文件数据偏移超出范围。');
+      if (!inRange(localAt, 30, directoryAt) || compressedSize > directoryAt - localAt - 30) throw err('ZIP 文件数据偏移超出范围。');
       const unixMode = data.getUint32(at + 38, true) >>> 16;
       entries.push(Object.freeze({name, rawName, flags, method, crc, compressedSize, size, localAt, symlink: (unixMode & 0xf000) === 0xa000}));
       at = next;
@@ -111,17 +196,21 @@
       if (!entrySet.has(entry)) throw err('读取目标不属于当前 ZIP。');
       if (entry.flags & 0x2041) throw err('发帖或引用媒体使用了加密 ZIP；请提供未加密的 X 归档。');
       if (entry.symlink) throw err('发帖或媒体文件不能是符号链接。');
-      if (entry.method !== 0 && entry.method !== 8) throw err('归档使用了不支持的压缩方式；仅支持普通 ZIP（stored/deflate）。');
+      if (entry.method !== 0 && entry.method !== 8) throw err('归档使用了不支持的压缩方式；仅支持 ZIP/ZIP64（stored/deflate）。');
       const header = new Uint8Array(await file.slice(entry.localAt, entry.localAt + 30).arrayBuffer());
       const local = view(header);
       if (header.length !== 30 || local.getUint32(0, true) !== 0x04034b50) throw err('ZIP 文件头损坏。');
       const nameLength = local.getUint16(26, true), extraLength = local.getUint16(28, true);
       if (local.getUint16(6, true) !== entry.flags || local.getUint16(8, true) !== entry.method) throw err('ZIP 文件头与目录记录不一致。');
-      const payloadAt = entry.localAt + 30 + nameLength + extraLength;
-      if (payloadAt + entry.compressedSize > directoryAt) throw err('ZIP 文件正文超出数据范围。');
-      const rawName = new Uint8Array(await file.slice(entry.localAt + 30, entry.localAt + 30 + nameLength).arrayBuffer());
+      const fieldsAt = entry.localAt + 30, fieldsLength = nameLength + extraLength;
+      if (!inRange(fieldsAt, fieldsLength, directoryAt) || entry.compressedSize > directoryAt - fieldsAt - fieldsLength) throw err('ZIP 文件正文超出数据范围。');
+      const payloadAt = fieldsAt + fieldsLength;
+      const fields = new Uint8Array(await file.slice(fieldsAt, payloadAt).arrayBuffer());
+      if (fields.length !== fieldsLength) throw err('ZIP 文件头扩展字段不完整。');
+      const rawName = fields.subarray(0, nameLength);
       if (!same(rawName, entry.rawName)) throw err('ZIP 文件名与目录记录不一致。');
-      if (!(entry.flags & 8) && (local.getUint32(14, true) !== entry.crc || local.getUint32(18, true) !== entry.compressedSize || local.getUint32(22, true) !== entry.size)) throw err('ZIP 长度或校验值与目录记录不一致。');
+      const sizes = localValues(fields.subarray(nameLength), local.getUint32(22, true), local.getUint32(18, true));
+      if (!(entry.flags & 8) && (local.getUint32(14, true) !== entry.crc || sizes.compressedSize !== entry.compressedSize || sizes.size !== entry.size)) throw err('ZIP 长度或校验值与目录记录不一致。');
       let stream = file.slice(payloadAt, payloadAt + entry.compressedSize).stream();
       if (entry.method === 8) {
         try {
