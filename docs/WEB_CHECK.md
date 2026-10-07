@@ -4,6 +4,8 @@
 
 GitHub Pages 只能发布静态网页，不能运行这个 Python 服务。本仓库提供完整服务与测试，但部署到 Pages 不代表搜索服务已经部署或配置成功。搜索服务未配置、请求失败或预算不足时，页面应保留明确的未检查状态。真实搜索验收需要已配置的合法搜索 API 和可从浏览器访问的服务地址。
 
+需要公开 HTTPS 服务时，可使用 [容器部署制品](WEB_CHECK_CONTAINER.md)。容器不携带搜索密钥，由选定平台配置环境变量、TLS 与实际域名。
+
 ## 本机使用
 
 Python 3.12+，无需额外依赖。从源码目录启动：
@@ -68,3 +70,11 @@ python -m unittest discover -s tests -p test_webcheck.py -v
 测试启动真实本地 HTTP 搜索响应与 HTML 来源 fixture，验证 POST → 两种 provider 协议 → 来源读取 → 正文提取 → 文本比对 → 证据回传。fixture 只用于验证协议与处理行为，不证明真实公开搜索成功。安全测试覆盖混合公网/私网 DNS、地址固定、私网重定向、provider key 不随重定向发送、正文限长、来源类型、同一帖子排除、CORS/Host/token、用户同意、预算与缺少 provider 的失败状态。
 
 上线验收还需要单独读取真实 provider 状态、真实候选网页与时间依据，确认 HTTPS 与浏览器 CORS 请求正常，并记录已实际执行的结果。未执行的真实搜索步骤应保持“待验证”，不能把本地 fixture 测试写成全网查重 PASS。
+
+部署后设置本机 `WEBCHECK_ACCESS_TOKEN` 环境变量，再执行：
+
+```sh
+python deployment/check_webcheck_live.py --endpoint https://实际查重服务 --output qa/webcheck-live-verification.json
+```
+
+此命令发送 Python 官方教程的一段公开引文；它会实际消耗最多两次搜索查询。只有服务配置存在、真实查询返回成功次数、至少一个来源正文被读取且有可比较重合证据才通过。搜索摘要、空结果、配置就绪或 HTTP 200 单独不能通过。它不读取真实用户归档，也不把服务访问 token 写进验收文件。浏览器实际访问、CORS 与发布源码身份仍需另行验证。

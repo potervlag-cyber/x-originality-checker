@@ -39,6 +39,8 @@ jobs:
           node --check browser/python-worker.js
           node --check browser/archive.js
           node --check browser/webcheck-client.js
+      - name: Build and smoke-test backend container
+        run: python deployment/smoke_webcheck_container.py
       - name: Build allowlisted static site
         run: python build_site.py --output _site --download-runtime
       - name: Upload Pages artifact

@@ -1,0 +1,11 @@
+# Allowlist the service only. Archives, .git, QA output, and secrets stay outside
+# the Docker build context, including files created later.
+*
+!Dockerfile
+!.dockerignore
+!webcheck.py
+!webcheck_server.py
+!deployment/
+deployment/*
+!deployment/container_entrypoint.py
+!deployment/container_healthcheck.py
