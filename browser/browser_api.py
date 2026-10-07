@@ -13,6 +13,7 @@ import json
 import re
 from urllib.parse import urlsplit
 import uuid
+from collections import Counter
 
 from engine import VERSION, _clean, analyze
 from importers import MAX_FILE_BYTES, import_data, normalize_project
@@ -103,15 +104,69 @@ def _web_check(state):
             "coverage": coverage, "posts": list(state["web_posts"].values()),
             "limitations": ["公开搜索收录和网页访问有缺口，实际全网覆盖未知；未发现匹配不能证明原创。",
                             "文字重合不能确认作者归属、授权、自转载或引用是否恰当，需人工复核。",
-                            "联网仅检查手动链接指定的 10 条归档正文，不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
+                            "联网仅检查在本机归档中手动勾选的 10 条正文，不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
                             "批次发出后取消、超时或响应无效时，上游是否执行及费用未知；返回的零成功次数只表示未取得证据，不表示没有检索消耗。",
                             "联网检查不重算离线参考概率，也不调用 X 官方审核或检查媒体来源。"]}
 
 
 def _current_archive():
     if _retained_archive is None:
-        raise ValueError("没有可联网检查的归档，请先完成 ZIP 分析。")
+        raise ValueError("没有可用归档，请先完成 ZIP 分析。")
     return _retained_archive
+
+
+def _check_session(data, state):
+    if "session_id" in data and data["session_id"] != state["session_id"]:
+        raise ValueError("这份请求不属于当前归档，请重新读取当前帖子列表。")
+
+
+def _id_list(value, *, exactly_ten=False):
+    if (not isinstance(value, list) or len(value) > 10 or (exactly_ten and len(value) != 10)
+            or any(not isinstance(pid, str) or not 1 <= len(pid) <= 256 or pid != pid.strip()
+                   or any(ord(char) < 32 or ord(char) == 127 for char in pid) for pid in value)
+            or len(set(value)) != len(value)):
+        raise ValueError("请勾选 10 条不同帖子。" if exactly_ten else "已选帖子编号应为最多 10 个不同的非空字符串。")
+    return value
+
+
+def _post_disabled_reason(post, ambiguous_ids):
+    if post["id"] in ambiguous_ids:
+        return "帖子编号对应多条冲突记录，无法唯一匹配；请核对归档。"
+    if post["type"] == "repost":
+        return "普通转帖不作为本人正文参加联网查重。"
+    if post["text_complete"] is not True:
+        return "归档正文不完整，无法确认需要核查的完整内容。"
+    if not post["text"].strip():
+        return "正文为空，没有可检索文字。"
+    if len(_clean(post["text"])) < 24:
+        return "正文不足 24 个可比较字符，无法可靠检索。"
+    return ""
+
+
+def _archive_posts(data):
+    """Read a bounded page from retained local text without locking selection."""
+    state = _current_archive()
+    _check_session(data, state)
+    limit = _integer(data.get("limit", 30), "每页帖子数", 1, 50)
+    query = _text(data.get("query", ""), "搜索词", 200).strip().casefold()
+    filter_mode = data.get("filter", "all")
+    if not isinstance(filter_mode, str) or filter_mode not in {"all", "eligible", "selected"}:
+        raise ValueError("帖子筛选应为 all、eligible 或 selected。")
+    selected_ids = set(_id_list(data.get("selected_ids", [])))
+    reasons = state["disabled_reasons"]
+    filtered = [post for post in state["posts"]
+                if (filter_mode != "eligible" or not reasons[post["id"]])
+                and (filter_mode != "selected" or post["id"] in selected_ids)
+                and (not query or query in post["text"].casefold() or query in post["id"].casefold())]
+    offset = _integer(data.get("offset", 0), "列表起点", maximum=len(filtered))
+    posts = [{"id": post["id"], "text": post["text"][:5000],
+              "text_truncated": len(post["text"]) > 5000, "original_chars": len(post["text"]),
+              "url": post["url"], "created_at": post["created_at"], "type": post["type"],
+              "eligible": not bool(reasons[post["id"]]), "disabled_reason": reasons[post["id"]]}
+             for post in filtered[offset:offset + limit]]
+    return {"session_id": state["session_id"], "total": len(state["posts"]),
+            "total_eligible": len(state["eligible"]), "filtered_total": len(filtered),
+            "offset": offset, "next_offset": offset + len(posts), "posts": posts}
 
 
 def _manual_ids(links):
@@ -144,26 +199,29 @@ def _manual_ids(links):
 
 def _web_plan(data):
     state = _current_archive()
+    _check_session(data, state)
     mode = data.get("mode", state["selection_mode"])
     if mode != "manual10":
-        raise ValueError("联网分析仅支持手动填写 10 条 X 帖子链接。")
+        raise ValueError("联网分析仅支持在归档中手动勾选 10 条帖子。")
     if len(state["eligible"]) < 10:
         raise ValueError("归档中不足 10 条完整且可检索的非转帖正文，无法执行 10 条联网分析；仍可使用本地分析。")
     selected = state["selected"]
-    if not state["selection_locked"] or "links" in data:
-        ids = _manual_ids(data.get("links"))
+    if not state["selection_locked"] or "ids" in data or "links" in data:
+        ids = _id_list(data["ids"], exactly_ten=True) if "ids" in data else _manual_ids(data.get("links"))
+        if "ids" in data and "links" in data and ids != _manual_ids(data["links"]):
+            raise ValueError("勾选编号与兼容链接指定的帖子不一致。")
         eligible = {post["id"]: post for post in state["eligible"]}
         for index, pid in enumerate(ids, 1):
             if pid not in eligible:
-                raise ValueError(f"第 {index} 个链接未匹配归档中可检索的完整非转帖正文；不会抓取链接或自动换选帖子。")
+                raise ValueError(f"第 {index} 条选择未匹配归档中可检索且编号唯一的完整非转帖正文；不会抓取链接或自动换选帖子。")
         if state["selection_locked"] and ids != [post["id"] for post in selected]:
-            raise ValueError("当前归档的 10 条联网选择已固定；请重新导入归档后再更换链接。")
+            raise ValueError("当前归档的 10 条联网选择已固定；请重新导入归档后再更换帖子。")
         selected = [eligible[pid] for pid in ids]
     offset = _integer(data.get("offset", 0), "检查起点", maximum=len(selected))
     limit = _integer(data.get("limit", 10), "每批帖子数", 1, 10)
     maximum = _integer(data.get("max_chars", 5000), "每条检索文字上限", 24, 5000)
     state.update(selected=selected, selection_mode=mode, selection_locked=True,
-                 sample_method="manual_x_status_links")
+                 sample_method="manual_archive_selection")
     posts = []
     cursor = offset
     while cursor < len(selected) and len(posts) < limit:
@@ -324,8 +382,9 @@ def _web_abandon(data):
     return _composed_result(state, next_state)
 
 
-def _web_result():
+def _web_result(data):
     state = _current_archive()
+    _check_session(data, state)
     return _composed_result(state, {**state, "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")})
 
 
@@ -357,10 +416,16 @@ def finish_archive_json(media_json):
             raise ValueError("归档媒体结果格式异常。")
         result = finish_archive(_prepared_archive, media)
         posts = _prepared_archive["project"]["posts"]
+        id_counts = Counter(post["id"] for post in posts)
+        url_counts = Counter(post["url"] for post in posts if post["url"])
+        ambiguous_ids = {post["id"] for post in posts
+                         if id_counts[post["id"]] > 1 or post["url"] and url_counts[post["url"]] > 1}
+        disabled_reasons = {post["id"]: _post_disabled_reason(post, ambiguous_ids) for post in posts}
         _retained_archive = {"session_id": uuid.uuid4().hex, "posts": posts,
             "assessed_posts": _prepared_archive.get("_assessed_posts", posts),
             "base_result": result,
-            "eligible": [p for p in posts if p["type"] != "repost" and p["text_complete"] is True and len(_clean(p["text"])) >= 24],
+            "disabled_reasons": disabled_reasons,
+            "eligible": [p for p in posts if not disabled_reasons[p["id"]]],
             "planned": {}, "web_posts": {}}
         _retained_archive.update(selected=[], selection_mode="not_selected", sample_method="not_selected", selection_locked=False)
         result["web_check"] = _web_check(_retained_archive)
@@ -396,6 +461,8 @@ def _dispatch(path, data):
     if path == "/api/archive/clear":
         clear_archive()
         return {"cleared": True}
+    if path == "/api/archive/posts":
+        return _archive_posts(data)
     if path == "/api/webcheck/plan":
         return _web_plan(data)
     if path == "/api/webcheck/apply":
@@ -403,7 +470,7 @@ def _dispatch(path, data):
     if path == "/api/webcheck/abandon":
         return _web_abandon(data)
     if path == "/api/webcheck/result":
-        return _web_result()
+        return _web_result(data)
     if path == "/api/import":
         encoded = data.get("content_base64", "")
         if not isinstance(encoded, str) or len(encoded) > MAX_FILE_BYTES * 4 // 3 + 8:

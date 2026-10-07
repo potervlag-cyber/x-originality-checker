@@ -248,7 +248,7 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
         if coverage.get("mode") == "sample10":
             result["requirements"][0]["interpretation"] += " 联网样本按归档顺序分散抽取，未将样本命中比例推广为全归档违规率。"
         elif coverage.get("mode") == "manual10":
-            result["requirements"][0]["interpretation"] += " 联网仅检查手动链接指定的 10 条归档正文，未将指定帖子的命中比例推广为全归档违规率。"
+            result["requirements"][0]["interpretation"] += " 联网仅检查在本机归档中手动勾选的 10 条正文，未将所选帖子的命中比例推广为全归档违规率。"
     return result
 
 
@@ -291,7 +291,7 @@ def combined_evidence(summary, policy, web_check, posts=None):
     else:
         status, title = "no_detected_overlap", "已检查材料未发现明显重合线索"
     mode = coverage.get("mode", "all")
-    scope = f"手动指定的 {selected} 条" if mode == "manual10" else f"分散抽取 {selected} 条" if mode == "sample10" else f"全部 {selected} 条可检索正文"
+    scope = f"手动勾选的 {selected} 条" if mode == "manual10" else f"分散抽取 {selected} 条" if mode == "sample10" else f"全部 {selected} 条可检索正文"
     if local_only:
         availability = f"共有 {total} 条可联网检索正文，本次未联网。" if total else "当前没有可联网检索的完整正文，本次未联网。"
         conclusion = (f"归档本地分析覆盖 {summary.get('total', 0)} 条记录，其中 {local_review} 条需人工复核。"

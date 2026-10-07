@@ -3,7 +3,7 @@
 (() => {
   const scriptURL = document.currentScript?.src || new URL('./runtime.js', document.baseURI).href;
   const workerURL = new URL('./python-worker.js', scriptURL).href;
-  const allowedPaths = new Set(['/api/import', '/api/analyze', '/api/report', '/api/health', '/api/shutdown', '/api/archive/clear', '/api/webcheck/plan', '/api/webcheck/apply', '/api/webcheck/abandon', '/api/webcheck/result']);
+  const allowedPaths = new Set(['/api/import', '/api/analyze', '/api/report', '/api/health', '/api/shutdown', '/api/archive/clear', '/api/archive/posts', '/api/webcheck/plan', '/api/webcheck/apply', '/api/webcheck/abandon', '/api/webcheck/result']);
   const INIT_TIMEOUT = 120000;
   const REQUEST_TIMEOUT = 180000;
   const ARCHIVE_TIMEOUT = 1800000;

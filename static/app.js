@@ -17,7 +17,14 @@
   let runMessage = '';
   let archiveClearPromise = Promise.resolve();
   let editingRecovery = false;
-  const linkInputs = Array.from({length: 10}, (_, index) => $(`#post-link-${index + 1}`));
+  const selectedPosts = new Set();
+  const POSTS_PER_PAGE = 30;
+  let pickerSession = '';
+  let listOffset = 0;
+  let listPage = null;
+  let listRequest = 0;
+  let listLoading = false;
+  let searchTimer = null;
 
   function clearRetainedArchive() {
     archiveClearPromise = archiveClearPromise.catch(() => {}).then(() => runtime.request('/api/archive/clear')).catch(() => {});
@@ -52,7 +59,7 @@
     $('#drop-zone').classList.remove('drag-over');
     $('#network-toggle-row').hidden = value;
     $('#network-enabled').disabled = value;
-    $('#run-analysis').disabled = value || webRunning;
+    syncPicker();
   }
 
   function count(value) {
@@ -170,10 +177,9 @@
     $('#web-consent').disabled = value;
     $('#web-endpoint').disabled = value;
     $('#web-token').disabled = value;
-    $('#run-analysis').disabled = value || busy;
     $('#cancel-network-setup').disabled = value;
     $('#cancel-network-button').disabled = value;
-    linkInputs.forEach(input => { input.disabled = value; });
+    syncPicker();
     $('#cancel-connection').hidden = !value || busy;
     $('#choose-file').disabled = value || busy;
     $('#change-file').disabled = value || busy;
@@ -204,7 +210,7 @@
     try {
       runPhase = 'connecting';
       // Freeze the user's selected IDs locally before any service request.
-      currentPlan = await runtime.request('/api/webcheck/plan', {mode: settings.scope, links: settings.links, offset: webOffset, limit: 3, max_chars: 5000});
+      currentPlan = await runtime.request('/api/webcheck/plan', {mode: settings.scope, ids: settings.ids, session_id: pickerSession, offset: webOffset, limit: 3, max_chars: 5000});
       if (ownGeneration !== generation) return;
       latestResult = await runtime.request('/api/webcheck/result');
       if (!currentPlan.posts?.length) { runPhase = 'completed'; runMessage = '所选范围没有尚待查询的可检索正文。'; return; }
@@ -390,38 +396,119 @@
     $('.upload-card').hidden = false;
     $('#drop-zone').hidden = false;
     $('#network-toggle-row').hidden = false;
-    linkInputs.forEach(input => { input.value = ''; input.readOnly = false; });
+    resetPicker();
     editingRecovery = false;
     $('#file-input').value = '';
     clearRetainedArchive();
-    if ($('#network-enabled').checked) openNetworkDialog();
-    else await runAnalysis({mode: 'local', scope: '', consent: false});
+    await runAnalysis({mode: $('#network-enabled').checked ? 'select' : 'local', scope: '', consent: false});
   }
 
-  function manualLinks() {
-    const ids = new Set();
-    return linkInputs.map((input, index) => {
-      const raw = input.value.trim();
-      let url, matched;
-      try {
-        url = new URL(raw);
-        matched = url.pathname.match(/^\/(?:[A-Za-z0-9_]{1,15}|i\/web)\/status\/([1-9][0-9]{0,29})(?:\/(?:photo|video)\/[1-9][0-9]*)?\/?$/);
-        if (!['https:', 'http:'].includes(url.protocol) || !['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com'].includes(url.hostname)
-          || url.username || url.password || url.port || !matched || raw.length > 2048 || /[\u0000-\u0020\u007f\\]/.test(raw)) throw new Error();
-      } catch {
-        input.focus();
-        throw new Error(`请在帖子 ${index + 1} 填写有效的 X 帖子链接，例如 https://x.com/用户名/status/帖子编号。`);
-      }
-      if (ids.has(matched[1])) { input.focus(); throw new Error(`帖子 ${index + 1} 与前面的链接重复，请选择 10 条不同的帖子。`); }
-      ids.add(matched[1]);
-      url.protocol = 'https:';
-      url.search = ''; url.hash = '';
-      return url.href;
+  function resetPicker() {
+    clearTimeout(searchTimer);
+    ++listRequest;
+    listLoading = false;
+    pickerSession = '';
+    listOffset = 0;
+    listPage = null;
+    selectedPosts.clear();
+    $('#post-search').value = '';
+    $('#post-filter').value = 'all';
+    $('#post-list').replaceChildren();
+    $('#posts-page-status').textContent = '';
+    $('#picker-summary').textContent = '';
+    syncPicker();
+  }
+
+  function syncPicker() {
+    const locked = busy || webRunning || editingRecovery;
+    $('#selection-count').textContent = `已选 ${selectedPosts.size} / 10 条${editingRecovery ? ' · 选择已固定' : ''}`;
+    $('#run-analysis').disabled = busy || webRunning || listLoading || selectedPosts.size !== 10 || !pickerSession;
+    $('#selection-clear').disabled = locked || !selectedPosts.size;
+    $('#local-only').hidden = editingRecovery;
+    $('#local-only').disabled = busy || webRunning || !latestResult;
+    $('#post-search').disabled = busy || webRunning;
+    $('#post-filter').disabled = busy || webRunning;
+    $('#posts-prev').disabled = busy || webRunning || listLoading || !listPage || listOffset === 0;
+    $('#posts-next').disabled = busy || webRunning || listLoading || !listPage || listPage.next_offset >= listPage.filtered_total;
+    $('#post-list').setAttribute('aria-busy', String(listLoading));
+    document.querySelectorAll('.post-select').forEach(input => {
+      input.checked = selectedPosts.has(input.dataset.id);
+      input.disabled = locked || input.dataset.eligible !== 'true' || (!input.checked && selectedPosts.size >= 10);
+      input.closest('.post-choice').classList.toggle('is-selected', input.checked);
     });
   }
 
+  function renderPostPage(page) {
+    const fragment = document.createDocumentFragment();
+    const types = {original: '主帖', article: '长文', reply: '回复', quote: '引用帖', repost: '普通转帖'};
+    for (const post of page.posts) {
+      const card = element('article', 'post-choice');
+      card.dataset.id = String(post.id);
+      if (!post.eligible) card.classList.add('is-unavailable');
+      const heading = element('div', 'post-choice-heading');
+      const label = element('label', 'post-select-label');
+      const checkbox = element('input', 'post-select');
+      checkbox.type = 'checkbox'; checkbox.dataset.id = String(post.id);
+      checkbox.dataset.eligible = String(post.eligible === true);
+      checkbox.setAttribute('aria-label', `选择帖子 ${post.id}`);
+      label.append(checkbox, element('span', '', `${dateOnly(post.created_at) || '日期未知'} · ${types[post.type] || '帖子'}`));
+      heading.append(label);
+      const url = safePostURL(post.url);
+      if (url) {
+        const link = element('a', '', '原帖 ↗');
+        link.href = url; link.target = '_blank'; link.rel = 'noreferrer'; heading.append(link);
+      }
+      const text = String(post.text || '（归档未提供正文）');
+      card.append(heading, element('p', 'post-preview', text.slice(0, 240)));
+      if (text.length > 240 || post.text_truncated) {
+        const detail = element('details', 'post-text-detail');
+        detail.append(element('summary', '', post.text_truncated ? '展开正文（显示前 5,000 字）' : '展开完整正文'), element('p', '', text));
+        card.append(detail);
+      }
+      card.append(element('p', 'post-id', `编号 ${post.id}`));
+      if (!post.eligible) card.append(element('p', 'post-disabled-reason', post.disabled_reason || '此条正文无法用于联网比较。'));
+      fragment.append(card);
+    }
+    if (!page.posts.length) fragment.append(element('p', 'post-empty', $('#post-filter').value === 'selected' ? '当前筛选中没有已选帖子。' : '没有符合搜索或筛选条件的帖子。'));
+    $('#post-list').replaceChildren(fragment);
+    $('#post-list').scrollTop = 0;
+    $('#picker-summary').textContent = `归档共 ${count(page.total)} 条 · 可联网查询 ${count(page.total_eligible)} 条 · 当前筛选 ${count(page.filtered_total)} 条${page.total_eligible < 10 ? '。可检索正文不足 10 条，可选择仅查看本地报告。' : ''}`;
+    $('#posts-page-status').textContent = page.filtered_total
+      ? `${count(listOffset + 1)}–${count(page.next_offset)} / ${count(page.filtered_total)} 条`
+      : '0 条';
+    syncPicker();
+  }
+
+  async function loadPostPage(offset = 0) {
+    if (!$('#network-dialog').open) return;
+    const ownGeneration = generation;
+    const requestID = ++listRequest;
+    listLoading = true;
+    listOffset = offset;
+    syncPicker();
+    try {
+      const data = {offset, limit: POSTS_PER_PAGE, query: $('#post-search').value.trim(),
+        filter: $('#post-filter').value, selected_ids: [...selectedPosts]};
+      if (pickerSession) data.session_id = pickerSession;
+      const page = await runtime.request('/api/archive/posts', data);
+      if (generation !== ownGeneration || requestID !== listRequest || !$('#network-dialog').open) return;
+      if (pickerSession && page.session_id !== pickerSession) throw new Error('帖子列表会话已变化，请重新上传归档。');
+      pickerSession = page.session_id;
+      listPage = page;
+      listLoading = false;
+      renderPostPage(page);
+    } catch (error) {
+      if (generation !== ownGeneration || requestID !== listRequest || !$('#network-dialog').open) return;
+      listLoading = false;
+      listPage = null;
+      showDialogError(error?.message || '无法读取本机帖子列表，请重新上传 ZIP。');
+      syncPicker();
+    }
+  }
+
   function settingsFromForm() {
-    const links = editingRecovery ? [...runSettings.links] : manualLinks();
+    const ids = editingRecovery ? [...runSettings.ids] : [...selectedPosts];
+    if (ids.length !== 10 || !pickerSession) throw new Error('请从归档列表勾选 10 条可联网查询的帖子。');
     if (!$('#web-consent').checked) {
       $('#web-consent').focus();
       throw new Error('请先确认这 10 条帖子的文字可以发送给查重服务和搜索提供商。');
@@ -434,7 +521,7 @@
       $('#web-token').focus();
       throw new Error('请填写服务提供者给出的访问码，再开始联网分析。');
     }
-    return {mode: 'network', scope: 'manual10', links, endpoint, token, consent: true};
+    return {mode: 'network', scope: 'manual10', ids, endpoint, token, consent: true};
   }
 
   function showDialogError(message) {
@@ -448,23 +535,33 @@
     $('#network-dialog-title').textContent = editingRecovery ? '继续所选 10 条的联网查询' : '选择 10 条帖子联网查重';
     $('#network-dialog-description').textContent = editingRecovery
       ? '本次帖子选择已固定。可修改连接信息，继续尚未发送的查询，已发送且结果未知的帖子不会重复查询。'
-      : '粘贴此 ZIP 中的 10 条 X 帖子链接。确认后分析全部归档，并联网核对这 10 条的公开来源。';
-    $('#run-analysis').textContent = editingRecovery ? '继续查询并更新报告' : '确认并开始分析';
+      : '归档已在本机读取。浏览全部帖子，勾选 10 条后联网核对公开来源，并生成综合报告。';
+    $('#run-analysis').textContent = editingRecovery ? '继续查询并更新报告' : '确认 10 条并联网查重';
     $('#dialog-error').hidden = true;
     $('#dialog-error').textContent = '';
-    linkInputs.forEach((input, index) => {
-      input.readOnly = editingRecovery;
-      if (editingRecovery) input.value = runSettings.links[index];
-    });
+    if (editingRecovery) {
+      selectedPosts.clear();
+      runSettings.ids.forEach(id => selectedPosts.add(id));
+      $('#post-filter').value = 'selected';
+      $('#post-search').value = '';
+    }
     $('#network-dialog').showModal();
     if (message) showDialogError(message);
+    loadPostPage(0);
     if (editingRecovery) $('#web-token').focus();
-    else linkInputs[0].focus();
+    else $('#post-search').focus();
+  }
+
+  function closeNetworkDialog() {
+    clearTimeout(searchTimer);
+    ++listRequest;
+    listLoading = false;
+    $('#network-dialog').close();
   }
 
   function cancelNetworkSetup() {
     if (busy || webRunning) return;
-    $('#network-dialog').close();
+    closeNetworkDialog();
     if (editingRecovery) { editingRecovery = false; return; }
     resetToSetup();
     $('#choose-file').focus();
@@ -495,14 +592,13 @@
     $('#results').hidden = true;
     $('#file-name').textContent = file.name;
     $('#file-size').textContent = `${(file.size / (1024 * 1024)).toFixed(2)} MB · 自动检测全部归档帖子`;
-    $('#processing-note').textContent = runSettings.mode === 'network'
-      ? 'ZIP 在本机处理，联网仅发送所选范围内的帖子字段。查询完成后自动生成综合报告。'
+    $('#processing-note').textContent = runSettings.mode === 'select'
+      ? '正在本机读取归档，随后可从帖子列表选择 10 条。此时不会发送帖子文字到查重服务。'
       : '全部归档分析在浏览器中进行；本次不会发送帖子文字到查重服务。';
     $('#cancel').textContent = '取消分析';
     $('#progress-message').textContent = '正在准备分析工具…';
     $('#engine-state').textContent = '';
     setBusy(true);
-    let validatingSelection = false;
     try {
       await archiveClearPromise;
       if (generation !== ownGeneration) return;
@@ -511,26 +607,18 @@
       const result = await runtime.inspectArchive(file, message => { if (generation === ownGeneration) $('#progress-message').textContent = String(message); });
       if (generation !== ownGeneration) return;
       latestResult = result;
-      if (runSettings.mode === 'network') {
-        validatingSelection = true;
-        await runtime.request('/api/webcheck/plan', {mode: 'manual10', links: runSettings.links, offset: 0, limit: 3, max_chars: 5000});
-        if (generation !== ownGeneration) return;
-        validatingSelection = false;
-        $('#cancel').textContent = '停止后续联网查询';
-        await runWebCheck(runSettings);
-      } else { runPhase = 'completed'; runMessage = '本地检查已完成。'; }
+      if (runSettings.mode === 'select') {
+        runPhase = 'selecting';
+        setBusy(false);
+        openNetworkDialog();
+        return;
+      }
+      runPhase = 'completed';
+      runMessage = '本地检查已完成。';
       if (generation !== ownGeneration) return;
       finishReport();
     } catch (error) {
       if (generation !== ownGeneration) return;
-      if (validatingSelection) {
-        latestResult = null;
-        runSettings = null;
-        runPhase = 'setup';
-        setBusy(false);
-        openNetworkDialog(error?.message || '链接无法对应此归档中的可检索帖子，请修正后重试。');
-        return;
-      }
       runPhase = 'local_failed';
       showError(error?.message || '无法完成分析，请检查归档下载是否完整并重试。');
       $('#engine-state').textContent = '';
@@ -540,7 +628,7 @@
   }
 
   async function resumeWebCheck(settings = runSettings) {
-    if (busy || webRunning || !latestResult || runSettings?.mode !== 'network') return;
+    if (busy || webRunning || !latestResult || settings?.mode !== 'network') return;
     clearError();
     runSettings = settings;
     const ownGeneration = generation;
@@ -575,7 +663,7 @@
     $('#network-toggle-row').hidden = false;
     $('#drop-zone').hidden = false;
     editingRecovery = false;
-    linkInputs.forEach(input => { input.value = ''; input.readOnly = false; });
+    resetPicker();
     clearError();
     clearRetainedArchive();
   }
@@ -587,14 +675,52 @@
     if (busy || webRunning) return;
     let settings;
     try { settings = settingsFromForm(); } catch (error) { showDialogError(error.message); return; }
-    const resuming = editingRecovery;
-    $('#network-dialog').close();
+    closeNetworkDialog();
     editingRecovery = false;
-    if (resuming) await resumeWebCheck(settings);
-    else await runAnalysis(settings);
+    await resumeWebCheck(settings);
   });
   $('#cancel-network-setup').addEventListener('click', cancelNetworkSetup);
   $('#cancel-network-button').addEventListener('click', cancelNetworkSetup);
+  $('#local-only').addEventListener('click', () => {
+    if (busy || webRunning || editingRecovery || !latestResult) return;
+    closeNetworkDialog();
+    runSettings = {mode: 'local', scope: '', consent: false};
+    runPhase = 'completed';
+    runMessage = '本地检查已完成，本次未执行联网查重。';
+    finishReport();
+  });
+  $('#post-list').addEventListener('change', event => {
+    const input = event.target;
+    if (!input.matches('.post-select')) return;
+    if (busy || webRunning || editingRecovery || input.dataset.eligible !== 'true') { syncPicker(); return; }
+    if (input.checked && selectedPosts.size < 10) selectedPosts.add(input.dataset.id);
+    else if (!input.checked) selectedPosts.delete(input.dataset.id);
+    syncPicker();
+    if ($('#post-filter').value === 'selected') loadPostPage(0);
+  });
+  $('#selection-clear').addEventListener('click', () => {
+    if (busy || webRunning || editingRecovery) return;
+    selectedPosts.clear();
+    syncPicker();
+    if ($('#post-filter').value === 'selected') loadPostPage(0);
+  });
+  $('#post-search').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    ++listRequest;
+    listLoading = true;
+    syncPicker();
+    searchTimer = setTimeout(() => loadPostPage(0), 250);
+  });
+  $('#post-search').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      clearTimeout(searchTimer);
+      loadPostPage(0);
+    }
+  });
+  $('#post-filter').addEventListener('change', () => { clearTimeout(searchTimer); loadPostPage(0); });
+  $('#posts-prev').addEventListener('click', () => loadPostPage(Math.max(0, listOffset - POSTS_PER_PAGE)));
+  $('#posts-next').addEventListener('click', () => { if (listPage) loadPostPage(listPage.next_offset); });
   $('#network-dialog').addEventListener('cancel', event => {
     event.preventDefault();
     cancelNetworkSetup();

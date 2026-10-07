@@ -1,5 +1,6 @@
 """Verify the browser adapter with real import, analysis, and report functions."""
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -53,7 +54,8 @@ class BrowserAdapterTests(unittest.TestCase):
         if browser_api._retained_archive is None:
             return request("/api/webcheck/plan", payload)
         if not browser_api._retained_archive["selection_locked"]:
-            payload.setdefault("links", self.links())
+            if "links" not in payload:
+                payload.setdefault("ids", [post["id"] for post in browser_api._retained_archive["eligible"][:10]])
         return request("/api/webcheck/plan", payload)
 
     def report(self, post_id, status="no_match", matches=None, **extra):
@@ -219,8 +221,8 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(31, base["summary"]["total"])
         self.assertTrue(base["summary"]["analyzed_all_archive_posts"])
         ids = [str(123456700 + index) for index in (30, 3, 26, 10, 13, 16, 20, 23, 6, 0)]
-        first = self.plan({"links": self.links(ids), "limit": 3})["result"]
-        self.assertEqual((31, 10, "manual_x_status_links"),
+        first = self.plan({"ids": ids, "limit": 3})["result"]
+        self.assertEqual((31, 10, "manual_archive_selection"),
                          (first["total_eligible"], first["selected_total"], first["sample_method"]))
         selected = []
         plan = first
@@ -294,7 +296,7 @@ class BrowserAdapterTests(unittest.TestCase):
         result = response["result"]
         self.assertEqual(("manual10", 10, 0), (result["web_check"]["coverage"]["mode"], result["web_check"]["coverage"]["selected_total"], result["web_check"]["coverage"]["searched"]))
         self.assertEqual("incomplete", result["summary"]["combined_evidence"]["status"])
-        self.assertIn("手动指定的 10 条", result["summary"]["combined_evidence"]["conclusion"])
+        self.assertIn("手动勾选的 10 条", result["summary"]["combined_evidence"]["conclusion"])
         self.assertEqual({}, browser_api._retained_archive["web_posts"])
 
     def test_completed_manual_ten_preserves_unselected_unknowns_and_offline_probability(self):
@@ -429,6 +431,132 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(json.loads(browser_api.finish_archive_json("not-json"))["ok"])
         self.assertIsNone(browser_api._prepared_archive)
         self.assertIsNone(browser_api._retained_archive)
+
+    def test_local_post_list_paginates_every_record_and_disables_ineligible_text(self):
+        records = [{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(40)]
+        records.extend([
+            {"id_str": "123456800", "full_text": TEXT, "retweeted_status_id_str": "9"},
+            {"id_str": "123456801", "full_text": "短帖"},
+            {"id_str": "123456802", "full_text": TEXT, "truncated": True},
+        ])
+        base = self.archive(records)
+        before = copy.deepcopy(browser_api._retained_archive)
+        first = request("/api/archive/posts")["result"]
+        self.assertEqual((43, 40, 43, 0, 30), tuple(first[key] for key in
+                         ("total", "total_eligible", "filtered_total", "offset", "next_offset")))
+        self.assertEqual(30, len(first["posts"]))
+        tail = request("/api/archive/posts", {"session_id": first["session_id"], "offset": first["next_offset"]})["result"]
+        self.assertEqual(43, tail["next_offset"])
+        self.assertEqual([str(123456700 + index) for index in range(40)] + ["123456800", "123456801", "123456802"],
+                         [post["id"] for post in first["posts"] + tail["posts"]])
+        self.assertEqual({"id", "text", "text_truncated", "original_chars", "url", "created_at", "type", "eligible", "disabled_reason"}, set(first["posts"][0]))
+        for post, reason in zip(tail["posts"][-3:], ("普通转帖", "不足 24", "不完整")):
+            self.assertFalse(post["eligible"])
+            self.assertIn(reason, post["disabled_reason"])
+        self.assertEqual([], request("/api/archive/posts", {"offset": 43})["result"]["posts"])
+        self.assertEqual(43, base["summary"]["total"])
+        self.assertEqual(before, browser_api._retained_archive)
+
+    def test_local_search_matches_full_text_beyond_display_limit_and_later_page(self):
+        long_text = TEXT * 100 + "Deep_LOCAL_Match"
+        self.archive([{"id_str": str(123456700 + index), "full_text": long_text if index == 35 else TEXT + str(index)} for index in range(41)])
+        listed = request("/api/archive/posts", {"query": "deep_local_match"})["result"]
+        self.assertEqual(1, listed["filtered_total"])
+        self.assertEqual("123456735", listed["posts"][0]["id"])
+        self.assertEqual(5000, len(listed["posts"][0]["text"]))
+        self.assertNotIn("Deep_LOCAL_Match", listed["posts"][0]["text"])
+        self.assertTrue(listed["posts"][0]["text_truncated"])
+        self.assertEqual(len(long_text), listed["posts"][0]["original_chars"])
+        id_search = request("/api/archive/posts", {"query": "123456740"})["result"]
+        self.assertEqual(["123456740"], [post["id"] for post in id_search["posts"]])
+        self.assertFalse(browser_api._retained_archive["selection_locked"])
+        self.assertEqual({}, browser_api._retained_archive["planned"])
+
+    def test_local_filters_and_selected_ids_never_lock_or_change_network_scope(self):
+        self.web_archive([
+            {"id_str": "123456701", "full_text": TEXT},
+            {"id_str": "123456702", "full_text": "短帖"},
+        ])
+        before = copy.deepcopy(browser_api._retained_archive)
+        eligible = request("/api/archive/posts", {"filter": "eligible", "limit": 50})["result"]
+        self.assertEqual(11, eligible["filtered_total"])
+        self.assertNotIn("123456702", [post["id"] for post in eligible["posts"]])
+        selected = request("/api/archive/posts", {"filter": "selected", "selected_ids": ["900000009", "123456701"], "limit": 1})["result"]
+        self.assertEqual(2, selected["filtered_total"])
+        self.assertEqual("123456701", selected["posts"][0]["id"])
+        tail = request("/api/archive/posts", {"filter": "selected", "selected_ids": ["900000009", "123456701"], "offset": 1})["result"]
+        self.assertEqual("900000009", tail["posts"][0]["id"])
+        self.assertEqual(0, request("/api/archive/posts", {"filter": "selected"})["result"]["filtered_total"])
+        self.assertEqual(before, browser_api._retained_archive)
+        for data in ({"limit": 0}, {"limit": 51}, {"limit": True}, {"offset": -1}, {"offset": 13},
+                     {"query": "a" * 201}, {"query": []}, {"filter": "all_online"},
+                     {"selected_ids": ["1"] * 2}, {"selected_ids": list(map(str, range(11)))}, {"selected_ids": [1]}):
+            with self.subTest(data=data):
+                self.assertFalse(request("/api/archive/posts", data)["ok"])
+                self.assertEqual(before, browser_api._retained_archive)
+
+    def test_local_list_and_id_plan_reject_stale_archive_session(self):
+        self.web_archive([{"id_str": "123456701", "full_text": TEXT}])
+        session = request("/api/archive/posts")["result"]["session_id"]
+        self.web_archive([{"id_str": "123456702", "full_text": TEXT}])
+        before = copy.deepcopy(browser_api._retained_archive)
+        ids = [post["id"] for post in before["eligible"][:10]]
+        for route, data in (("/api/archive/posts", {"session_id": session}),
+                            ("/api/webcheck/plan", {"session_id": session, "mode": "manual10", "ids": ids}),
+                            ("/api/webcheck/result", {"session_id": session})):
+            self.assertFalse(request(route, data)["ok"])
+            self.assertEqual(before, browser_api._retained_archive)
+        self.assertNotEqual(session, request("/api/archive/posts")["result"]["session_id"])
+        request("/api/archive/clear")
+        self.assertFalse(request("/api/archive/posts", {"session_id": session})["ok"])
+
+    def test_manual_id_selection_validates_atomically_and_resumes_without_replaying_unknowns(self):
+        self.web_archive([
+            {"id_str": "123456701", "full_text": TEXT},
+            {"id_str": "123456702", "full_text": "短帖"},
+            {"id_str": "123456703", "full_text": TEXT, "truncated": True},
+        ])
+        ids = [post["id"] for post in browser_api._retained_archive["eligible"][:10]]
+        before = copy.deepcopy(browser_api._retained_archive)
+        invalid = [ids[:9], ids + ["900000009"], [ids[0], ids[0], *ids[2:]],
+                   [123456701, *ids[1:]], ["not-in-archive", *ids[1:]],
+                   ["123456702", *ids[1:]], ["123456703", *ids[1:]]]
+        for candidate in invalid:
+            with self.subTest(candidate=candidate):
+                self.assertFalse(self.plan({"ids": candidate})["ok"])
+                self.assertEqual(before, browser_api._retained_archive)
+        self.assertFalse(self.plan({"ids": ids, "limit": 11})["ok"])
+        self.assertFalse(self.plan({"ids": ids, "links": self.links(list(reversed(ids)))})["ok"])
+        self.assertEqual(before, browser_api._retained_archive)
+        first = self.plan({"ids": ids, "limit": 3})["result"]
+        fixed = copy.deepcopy(browser_api._retained_archive)
+        for replacement in (list(reversed(ids)), [*ids[:9], "900000009"]):
+            self.assertFalse(self.plan({"ids": replacement})["ok"])
+            self.assertEqual(fixed, browser_api._retained_archive)
+        abandoned_ids = [post["id"] for post in first["posts"]]
+        abandoned = request("/api/webcheck/abandon", {"session_id": first["session_id"], "ids": abandoned_ids, "reason": "cancelled"})
+        self.assertTrue(abandoned["ok"], abandoned)
+        resumed = self.plan({"ids": ids, "offset": 0, "limit": 10, "session_id": first["session_id"]})["result"]
+        self.assertEqual(ids[3:], [post["id"] for post in resumed["posts"]])
+        self.assertTrue(resumed["done"])
+        self.assertEqual(3, abandoned["result"]["web_check"]["coverage"]["execution_unknown_posts"])
+        self.assertEqual(ids, [post["id"] for post in browser_api._retained_archive["selected"]])
+
+    def test_conflicting_source_ids_are_visible_but_never_ambiguously_selectable(self):
+        self.web_archive([
+            {"id_str": "123456701", "full_text": TEXT + "第一个版本"},
+            {"id_str": "123456701", "full_text": TEXT + "冲突的第二个版本"},
+        ])
+        listing = request("/api/archive/posts")["result"]
+        self.assertEqual((12, 10), (listing["total"], listing["total_eligible"]))
+        conflicts = listing["posts"][:2]
+        self.assertEqual(2, len({post["id"] for post in conflicts}))
+        for post in conflicts:
+            self.assertFalse(post["eligible"])
+            self.assertIn("冲突记录", post["disabled_reason"])
+            ids = [item["id"] for item in browser_api._retained_archive["eligible"][:10]]
+            self.assertFalse(self.plan({"ids": [post["id"], *ids[1:]]})["ok"])
+            self.assertFalse(browser_api._retained_archive["selection_locked"])
 
 
 if __name__ == "__main__":

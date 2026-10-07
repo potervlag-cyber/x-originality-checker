@@ -26,7 +26,7 @@
       <section class="upload-card" aria-labelledby="upload-title">
         <div class="network-toggle-row" id="network-toggle-row">
           <label class="network-switch"><span>联网查重</span><input id="network-enabled" type="checkbox" role="switch" aria-describedby="network-toggle-note"><span class="switch-track" aria-hidden="true"></span></label>
-          <p id="network-toggle-note">开启后，上传 ZIP 再填写要检查的 10 条帖子链接</p>
+          <p id="network-toggle-note">开启后，上传 ZIP 再从帖子列表勾选 10 条</p>
         </div>
         <div class="drop-zone" id="drop-zone">
           <svg class="upload-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M29 6H13a4 4 0 0 0-4 4v28a4 4 0 0 0 4 4h22a4 4 0 0 0 4-4V16L29 6Z" stroke="currentColor" stroke-width="1.7"/><path d="M29 6v10h10M22 12h4m-4 5h4m-4 5h4m-4 5h4m-4 5h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -49,26 +49,22 @@
       <dialog class="network-dialog" id="network-dialog" aria-labelledby="network-dialog-title" aria-describedby="network-dialog-description">
         <form id="network-form" novalidate>
           <div class="dialog-heading"><h2 id="network-dialog-title">选择 10 条帖子联网查重</h2><button class="button quiet" id="cancel-network-setup" type="button" aria-label="关闭联网设置">关闭 ×</button></div>
-          <p id="network-dialog-description">粘贴此 ZIP 中的 10 条 X 帖子链接。确认后分析全部归档，并联网核对这 10 条的公开来源。</p>
+          <p id="network-dialog-description">归档已在本机读取。浏览全部帖子，勾选 10 条后联网核对公开来源，并生成综合报告。</p>
           <p class="dialog-file" id="dialog-file"></p>
-          <div class="post-link-grid">
-            <label for="post-link-1">帖子 1<input id="post-link-1" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-2">帖子 2<input id="post-link-2" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-3">帖子 3<input id="post-link-3" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-4">帖子 4<input id="post-link-4" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-5">帖子 5<input id="post-link-5" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-6">帖子 6<input id="post-link-6" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-7">帖子 7<input id="post-link-7" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-8">帖子 8<input id="post-link-8" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-9">帖子 9<input id="post-link-9" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
-            <label for="post-link-10">帖子 10<input id="post-link-10" type="url" required placeholder="https://x.com/用户名/status/…" autocomplete="off" spellcheck="false"></label>
+          <div class="post-picker-tools">
+            <label for="post-search">搜索归档帖子<input id="post-search" type="search" maxlength="200" placeholder="搜索正文关键词或帖子编号" autocomplete="off"></label>
+            <label for="post-filter">显示<select id="post-filter"><option value="all">全部帖子</option><option value="eligible">可联网查询</option><option value="selected">只看已选</option></select></label>
           </div>
-          <p class="dialog-hint">需填写 10 个不同的链接，对应归档中有完整正文的非普通转帖（至少 24 个可比较字符）。不会自动补选或查询其他帖子。</p>
+          <div class="selection-bar"><strong id="selection-count" role="status" aria-live="polite">已选 0 / 10 条</strong><button class="button quiet" id="selection-clear" type="button">清空选择</button></div>
+          <p class="picker-summary" id="picker-summary"></p>
+          <div class="post-list" id="post-list" aria-label="归档帖子列表" aria-busy="false"></div>
+          <div class="posts-pagination"><button class="button secondary" id="posts-prev" type="button">上一页</button><span id="posts-page-status" role="status" aria-live="polite"></span><button class="button secondary" id="posts-next" type="button">下一页</button></div>
+          <p class="dialog-hint">需选择 10 条。普通转帖、正文缺失或不完整、正文过短的帖子会显示不可选原因；翻页和搜索会保留选择。</p>
           <label class="access-code-label" for="web-token">服务访问码<input id="web-token" type="password" autocomplete="off" placeholder="填写此工具提供者给出的访问码"></label>
           <details class="service-settings"><summary>连接设置</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><p>搜索 API 密钥留在服务端，访问码仅在本页使用。所有使用者共用服务额度。</p><div class="web-actions"><button class="button secondary" id="web-connect" type="button">检查服务连接</button><button class="button quiet" id="cancel-connection" type="button" hidden>取消连接</button></div><p class="setup-status" id="setup-status" role="status" aria-live="polite">分析时会自动连接查重服务。</p></details>
           <label class="consent-option"><input id="web-consent" type="checkbox"><span>我同意将这 10 条帖子的文字发送给查重服务及搜索提供商。ZIP、媒体、私信和账号资料保留在本机；每条最多查前 5,000 字。</span></label>
           <p class="dialog-error" id="dialog-error" role="alert" hidden></p>
-          <div class="dialog-actions"><button class="button secondary" id="cancel-network-button" type="button">取消</button><button class="button primary" id="run-analysis" type="submit">确认并开始分析</button></div>
+          <div class="dialog-actions"><button class="button quiet" id="local-only" type="button">仅查看本地报告</button><button class="button secondary" id="cancel-network-button" type="button">取消</button><button class="button primary" id="run-analysis" type="submit" disabled>确认 10 条并联网查重</button></div>
         </form>
       </dialog>
       <section class="results" id="results" aria-labelledby="result-title" hidden>

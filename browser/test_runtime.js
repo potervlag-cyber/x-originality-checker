@@ -71,6 +71,26 @@ test('independent request ids deliver the corresponding JSON response', async ()
   assert.equal(timers.size, 0);
 });
 
+test('archive list search and chosen IDs are sent only to the local Worker', async () => {
+  const {runtime, workers, timers} = await initialized();
+  const listingData = {session_id: 'local-session', query: 'local full text', filter: 'selected', selected_ids: ['123456701'], offset: 30, limit: 30};
+  const listing = runtime.request('/api/archive/posts', listingData);
+  const sentList = workers[0].sent[0];
+  assert.equal(sentList.type, 'request');
+  assert.deepEqual(JSON.parse(sentList.request_json), {path: '/api/archive/posts', data: listingData});
+  workers[0].emit('message', {type: 'result', id: sentList.id, result_json: JSON.stringify({ok: true, result: {session_id: 'local-session', total: 60, filtered_total: 1, posts: []}})});
+  assert.equal((await listing).session_id, 'local-session');
+  const ids = Array.from({length: 10}, (_, index) => String(123456700 + index));
+  const plan = runtime.request('/api/webcheck/plan', {session_id: 'local-session', mode: 'manual10', ids});
+  const sentPlan = workers[0].sent[1];
+  assert.deepEqual(JSON.parse(sentPlan.request_json).data.ids, ids);
+  assert.equal(Object.hasOwn(JSON.parse(sentPlan.request_json).data, 'links'), false);
+  workers[0].emit('message', {type: 'result', id: sentPlan.id, result_json: JSON.stringify({ok: true, result: {mode: 'manual10', selected_total: 10}})});
+  assert.equal((await plan).selected_total, 10);
+  assert.equal(workers.length, 1);
+  assert.equal(timers.size, 0);
+});
+
 test('input errors reject one request without stopping a healthy engine', async () => {
   const {runtime, workers} = await initialized();
   const request = runtime.request('/api/import', {filename: 'bad.csv'});
