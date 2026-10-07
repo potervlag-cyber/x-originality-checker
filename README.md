@@ -28,6 +28,10 @@
 
 GitHub Pages 提供界面和本地分析，联网服务需要单独启动或部署；搜索 API 密钥仅放服务端环境变量。服务实现、配置、调用范围与启动步骤见 [联网查重说明](docs/WEB_CHECK.md)。没有配置搜索服务时会明确提示未执行，不以演示结果冒充实际联网查重。
 
+推荐使用 **Render 免费 Web Service + Tavily**。下面的按钮按仓库 Blueprint 创建一个免费后端，提示在 Render 填写 Tavily key，并自动生成独立的服务访问码；步骤与免费版冷启动限制见 [Render 配置指南](docs/RENDER_SETUP.md)。只部署成功仍需完成真实查询验收。
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https%3A%2F%2Fgithub.com%2Fpotervlag-cyber%2Fx-originality-checker)
+
 ## 开发和部署
 
 Python 3.12+ 与 Node 22+：

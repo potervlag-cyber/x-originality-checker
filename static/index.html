@@ -59,7 +59,7 @@
           <details class="service-settings"><summary>连接查重服务</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><label>服务访问码（如需，仅本页使用）<input id="web-token" type="password" autocomplete="off"></label><p>搜索 API 密钥保存在服务端。这里填写服务访问码，不填写 Tavily 或 Brave 的 API 密钥。</p></details>
           <div class="web-options"><label>本次范围<select id="web-limit"><option value="10">接下来 10 条可比较正文</option><option value="100">接下来 100 条可比较正文</option><option value="all">全部剩余可比较正文</option></select></label><button class="button secondary" id="web-connect" type="button">检查服务连接</button></div>
           <label class="consent-option"><input id="web-consent" type="checkbox"><span>我确认本次待检索的归档文字可发送给查重服务及搜索提供商。归档无法确认帖子当前是否公开；ZIP、媒体、私信和账号资料不会发送。每条最多检索前 5,000 字，剩余部分会标记为未查。</span></label>
-          <div class="web-actions"><button class="button primary" id="web-start" type="button">开始联网查重</button><button class="button quiet" id="web-cancel" type="button" hidden>取消联网查重</button></div>
+          <div class="web-actions"><button class="button primary" id="web-start" type="button">开始联网查重</button><button class="button quiet" id="web-cancel" type="button" hidden>取消联网操作</button></div>
           <div class="web-evidence" id="web-evidence"></div>
         </section>
         <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">这次估计的原因</h3><div class="reason-list" id="reason-list"></div></section>

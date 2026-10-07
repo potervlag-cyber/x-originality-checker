@@ -154,6 +154,7 @@
 
   async function checkService() {
     const client = window.OriginalityWebCheck.create($('#web-endpoint').value, {accessToken: $('#web-token').value});
+    $('#web-status').textContent = '正在连接查重服务；若服务正在唤醒，可能需要约一分钟，请稍候…';
     const status = await client.status(webController?.signal);
     if (!status.ready) throw new Error('查重服务尚未配置搜索 API，当前没有执行联网检索。');
     $('#web-status').textContent = `已连接 ${status.provider || '公开来源搜索'}。本小时剩余 ${count(status.limits?.hourly_queries_remaining)} 次查询，每条最多 ${count(status.limits?.max_queries_per_post || 2)} 次。`;
@@ -362,12 +363,19 @@
   $('#change-file').addEventListener('click', chooseFile);
   $('#web-start').addEventListener('click', startWebCheck);
   $('#web-connect').addEventListener('click', async () => {
-    if (webRunning) return;
-    try { await checkService(); } catch (error) { $('#web-status').textContent = error?.message || '查重服务连接失败。'; }
+    if (busy || webRunning) return;
+    const ownGeneration = generation;
+    webController = new AbortController();
+    setWebRunning(true);
+    try { await checkService(); } catch (error) {
+      if (ownGeneration === generation) $('#web-status').textContent = error?.message || '查重服务连接失败。';
+    } finally {
+      if (ownGeneration === generation) { webController = null; setWebRunning(false); }
+    }
   });
   $('#web-cancel').addEventListener('click', () => {
     webController?.abort();
-    $('#web-status').textContent = '已取消联网查重，已完成的结果保留。';
+    $('#web-status').textContent = '已取消联网操作，已完成的结果保留。';
   });
   fetch('./webcheck-config.json', {credentials:'same-origin'}).then(response => response.ok ? response.json() : null)
     .then(config => { if (config?.endpoint && !$('#web-endpoint').value) $('#web-endpoint').value = window.OriginalityWebCheck.endpoint(config.endpoint); })

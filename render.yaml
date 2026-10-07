@@ -1,0 +1,31 @@
+# Render Blueprint: one free search backend, no database or paid resource.
+# Search keys are entered in Render; the service access token is generated there.
+services:
+  - type: web
+    name: originality-webcheck
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    healthCheckPath: /api/webcheck/status
+    envVars:
+      - key: WEBCHECK_PROVIDER
+        value: tavily
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: WEBCHECK_ACCESS_TOKEN
+        generateValue: true
+      - key: WEBCHECK_ALLOWED_HOSTS
+        fromService:
+          type: web
+          name: originality-webcheck
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: WEBCHECK_ALLOWED_ORIGINS
+        value: https://potervlag-cyber.github.io
+      - key: WEBCHECK_HOURLY_QUERY_BUDGET
+        value: '100'
+      - key: PORT
+        value: '10000'
