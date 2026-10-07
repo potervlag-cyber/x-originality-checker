@@ -8,6 +8,9 @@
   let generation = 0;
   let latestResult = null;
   let latestFilename = '';
+  let webController = null;
+  let webOffset = 0;
+  let webRunning = false;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -64,6 +67,138 @@
     return '';
   }
 
+  function safeSourceURL(value) {
+    try {
+      const url = new URL(String(value));
+      if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) return url.href;
+    } catch { /* Untrusted source URLs are rendered as text only. */ }
+    return '';
+  }
+
+  function renderPolicy(policy) {
+    const fragment = document.createDocumentFragment();
+    $('#policy-description').textContent = policy?.disclaimer || '以下为工具检查到的风险线索及材料缺口，不是官方不符合评分。';
+    for (const rule of Array.isArray(policy?.requirements) ? policy.requirements : []) {
+      const card = element('article', 'policy-card');
+      const heading = element('div', 'policy-heading');
+      heading.append(element('h4', '', rule.title), element('strong', 'policy-degree', rule.degree || '无法判断'));
+      card.append(heading, element('p', '', rule.official_requirement || ''));
+      const rate = percent(rule.signal_percent);
+      card.append(element('p', 'policy-count', `风险线索 ${count(rule.signal_count)} 条 / ${count(rule.denominator)} 条非普通转帖记录${rate !== '—' ? `（${rate}）` : ''} · 已检查 ${count(rule.assessed_count)} 条 · 证据不足 ${count(rule.unknown_count)} 条`));
+      card.append(element('p', '', rule.interpretation || '未发现线索不能证明符合；需结合创作与来源证据复核。'));
+      const evidence = Array.isArray(rule.evidence) ? rule.evidence.slice(0, 4) : [];
+      if (evidence.length) {
+        const list = element('ul');
+        for (const item of evidence) list.append(element('li', '', `${item.post_id || item.id || ''}：${item.detail || item.message || item.code || '需复核'}`));
+        card.append(list);
+      }
+      fragment.append(card);
+    }
+    $('#policy-list').replaceChildren(fragment);
+    const source = policy?.source || {};
+    const note = element('span', '', `规则参考版本：${source.reference_date || '待核实'}。${source.live_verification === 'unavailable' ? '本次官方页读取受限，未将其标记为已重新核验。' : ''}账号资格、权利授权及创作过程需另行提供证据。 `);
+    const link = element('a', '', '查看官方原创内容奖励要求 ↗');
+    link.href = 'https://help.x.com/en/using-x/original-content-rewards'; link.target = '_blank'; link.rel = 'noreferrer';
+    $('#policy-source').replaceChildren(note, link);
+  }
+
+  function renderWebCheck(report) {
+    const fragment = document.createDocumentFragment();
+    if (!report) { $('#web-evidence').replaceChildren(); return; }
+    const coverage = report.coverage || {};
+    fragment.append(element('p', 'web-summary', `实际检索 ${count(coverage.searched)} 条 · 来源正文已核对 ${count(coverage.compared)} 条 · 失败 ${count(coverage.failed)} 条 · 尚未检索 ${count(coverage.remaining)} 条。全网收录覆盖未知；这次检索未重算上方离线参考概率。`));
+    if (coverage.text_truncated_posts > 0) fragment.append(element('p', 'web-summary', `${count(coverage.text_truncated_posts)} 条正文只检索了部分文字，剩余内容未查；即使未发现相似来源也不计为完整检查。`));
+    const posts = Array.isArray(report.posts) ? report.posts : [];
+    const matched = posts.filter(post => Array.isArray(post.matches) && post.matches.length);
+    for (const post of matched.slice(0, 30)) {
+      const card = element('article', 'source-card');
+      card.append(element('h4', '', `帖子 ${post.id} · 相似来源需复核`));
+      if (post.matches_total > post.matches.length) card.append(element('p', 'evidence-level', `发现 ${count(post.matches_total)} 个相似来源，保留最多 3 条来源证据供复核。`));
+      if (post.text_truncated) card.append(element('p', 'evidence-level', '本次只检查前 5,000 字，余下正文未检索。'));
+      for (const match of post.matches.slice(0, 3)) {
+        const url = safeSourceURL(match.url);
+        if (url) {
+          const link = element('a', '', match.title || url);
+          link.href = url; link.target = '_blank'; link.rel = 'noreferrer'; card.append(link);
+        }
+        const fullText = match.source_kind === 'page_body' && match.page_status === 'fetched';
+        const similarity = typeof match.score === 'number' ? percent(match.score * 100) : '—';
+        card.append(element('p', 'evidence-level', `${fullText ? '来源正文证据' : '搜索摘要线索，来源正文未完整核对'} · 片段相似度 ${similarity} · 作者与许可未核验`));
+        if (match.source_text_truncated) card.append(element('p', 'evidence-level', '来源正文只核对前 100,000 字，余下内容未比对。'));
+        if (match.post_excerpt) card.append(element('blockquote', '', `归档片段：${match.post_excerpt}`));
+        if (match.source_excerpt) card.append(element('blockquote', '', `来源片段：${match.source_excerpt}`));
+        const relation = {earlier:'页面显示时间早于该帖',later:'页面显示时间晚于该帖',same:'页面显示时间相近',unknown:'来源发布时间未知'}[match.temporal_relation] || '来源发布时间未知';
+        card.append(element('p', '', `${relation}${match.published_at ? `（${String(match.published_at).slice(0, 30)}）` : ''}；页面时间不能独立证明首发或搬运。`));
+      }
+      fragment.append(card);
+    }
+    if (matched.length > 30) fragment.append(element('p', 'web-summary', '更多来源证据保留在下载的 JSON 报告中。'));
+    const noMatch = posts.filter(post => post.status === 'no_match').length;
+    const partial = posts.filter(post => post.status === 'partial').length;
+    if (noMatch) fragment.append(element('p', 'web-post-status', `${count(noMatch)} 条在实际检索范围内未发现明显相似片段，不代表原创。`));
+    if (partial) fragment.append(element('p', 'web-post-status', `${count(partial)} 条仅完成部分检索，完整性不足。`));
+    if (report.limitations?.length) fragment.append(element('p', 'web-summary', report.limitations.slice(0, 5).join('；')));
+    $('#web-evidence').replaceChildren(fragment);
+  }
+
+  function setWebRunning(value) {
+    webRunning = value;
+    $('#web-start').disabled = value;
+    $('#web-connect').disabled = value;
+    $('#web-limit').disabled = value;
+    $('#web-consent').disabled = value;
+    $('#web-cancel').hidden = !value;
+    $('#choose-file').disabled = value || busy;
+    $('#change-file').disabled = value || busy;
+  }
+
+  async function checkService() {
+    const client = window.OriginalityWebCheck.create($('#web-endpoint').value, {accessToken: $('#web-token').value});
+    const status = await client.status(webController?.signal);
+    if (!status.ready) throw new Error('查重服务尚未配置搜索 API，当前没有执行联网检索。');
+    $('#web-status').textContent = `已连接 ${status.provider || '公开来源搜索'}。本小时剩余 ${count(status.limits?.hourly_queries_remaining)} 次查询，每条最多 ${count(status.limits?.max_queries_per_post || 2)} 次。`;
+    return {client, status};
+  }
+
+  async function startWebCheck() {
+    if (busy || webRunning || !latestResult) return;
+    clearError();
+    if (!$('#web-consent').checked) { showError('请先确认本次待检索文字可以发送给查重服务和搜索提供商。'); return; }
+    const ownGeneration = generation;
+    webController = new AbortController();
+    setWebRunning(true);
+    try {
+      const {client, status} = await checkService();
+      const value = $('#web-limit').value;
+      const maximum = value === 'all' ? Number.MAX_SAFE_INTEGER : Number(value);
+      let checked = 0;
+      while (checked < maximum && !webController.signal.aborted) {
+        const limit = Math.min(3, maximum - checked, status.limits?.max_posts || 10);
+        const plan = await runtime.request('/api/webcheck/plan', {offset: webOffset, limit, max_chars: Math.min(5000, status.limits?.max_checked_chars || 5000)});
+        if (ownGeneration !== generation) return;
+        if (!plan.posts?.length) { $('#web-status').textContent = '已检查全部可比较正文；搜索覆盖仍受收录与访问权限限制。'; break; }
+        $('#web-status').textContent = `正在检索第 ${count(webOffset + 1)}–${count(webOffset + plan.posts.length)} 条 / ${count(plan.total_eligible)} 条可比较正文…`;
+        const report = await client.check(plan.posts, webController.signal);
+        if (ownGeneration !== generation || webController.signal.aborted) return;
+        const updated = await runtime.request('/api/webcheck/apply', {session_id: plan.session_id, report});
+        if (ownGeneration !== generation) return;
+        latestResult = updated;
+        const examplesOpen = $('#examples-section').open;
+        renderResult(updated, {name: latestFilename});
+        $('#examples-section').open = examplesOpen;
+        webOffset = plan.next_offset;
+        checked += plan.posts.length;
+        $('#web-status').textContent = `本轮完成 ${count(checked)} 条，累计请求 ${count(webOffset)} 条；可下载目前证据。`;
+        if (plan.done) break;
+      }
+    } catch (error) {
+      if (ownGeneration !== generation) return;
+      $('#web-status').textContent = error?.message || '联网查重失败，本地分析及已完成证据保留。';
+    } finally {
+      if (ownGeneration === generation) { webController = null; setWebRunning(false); }
+    }
+  }
+
   function renderResult(result, file) {
     if (!result || typeof result.summary !== 'object' || !result.summary || !Number.isSafeInteger(result.summary.total)) {
       throw new Error('分析工具未返回有效结果，请重新选择归档后重试。');
@@ -113,6 +248,11 @@
       fragment.append(cell);
     }
     $('#stats-grid').replaceChildren(fragment);
+    renderPolicy(result.policy_checks);
+    renderWebCheck(result.web_check);
+    if (!webRunning && (!result.web_check || result.web_check.status === 'not_started')) {
+      $('#web-status').textContent = $('#web-endpoint').value ? '尚未联网查重。' : '尚未配置搜索服务；连接查重服务后可开始联网检索。';
+    }
 
     const factors = Array.isArray(result.probability_factors) ? result.probability_factors.filter(item => item && typeof item === 'object') : [];
     const factorCodes = new Set(factors.map(item => item.code).filter(Boolean));
@@ -169,7 +309,7 @@
   }
 
   async function inspectFiles(files) {
-    if (busy || !files.length) return;
+    if (busy || webRunning || !files.length) return;
     clearError();
     if (files.length !== 1) { showError('请一次选择一个从 X 下载的归档 ZIP。'); return; }
     const file = files[0];
@@ -181,6 +321,9 @@
     const ownGeneration = ++generation;
     latestResult = null;
     latestFilename = '';
+    webOffset = 0;
+    $('#web-consent').checked = false;
+    $('#web-status').textContent = '尚未联网查重。';
     $('#results').hidden = true;
     $('.upload-card').hidden = false;
     $('#file-name').textContent = file.name;
@@ -210,13 +353,25 @@
   }
 
   function chooseFile() {
-    if (busy) return;
+    if (busy || webRunning) return;
     $('#file-input').value = '';
     $('#file-input').click();
   }
 
   $('#choose-file').addEventListener('click', chooseFile);
   $('#change-file').addEventListener('click', chooseFile);
+  $('#web-start').addEventListener('click', startWebCheck);
+  $('#web-connect').addEventListener('click', async () => {
+    if (webRunning) return;
+    try { await checkService(); } catch (error) { $('#web-status').textContent = error?.message || '查重服务连接失败。'; }
+  });
+  $('#web-cancel').addEventListener('click', () => {
+    webController?.abort();
+    $('#web-status').textContent = '已取消联网查重，已完成的结果保留。';
+  });
+  fetch('./webcheck-config.json', {credentials:'same-origin'}).then(response => response.ok ? response.json() : null)
+    .then(config => { if (config?.endpoint && !$('#web-endpoint').value) $('#web-endpoint').value = window.OriginalityWebCheck.endpoint(config.endpoint); })
+    .catch(() => { /* A user may connect a service explicitly through settings. */ });
   $('#file-input').addEventListener('change', event => inspectFiles([...event.target.files]));
   $('#result-title').tabIndex = -1;
   const zone = $('#drop-zone');

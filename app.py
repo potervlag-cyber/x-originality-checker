@@ -48,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -76,8 +76,9 @@ class Handler(BaseHTTPRequestHandler):
             if not source.is_file():
                 source = ROOT / "materials" / "guide.md"
             return self.send_json({"text": source.read_text(encoding="utf-8-sig")})
-        browser_routes = {"/" + name: ROOT / "browser" / name for name in ("runtime.js", "python-worker.js", "archive.js", "browser_api.py")}
-        browser_routes.update({"/" + name: ROOT / name for name in ("archive_adapter.py", "engine.py", "importers.py", "reports.py")})
+        browser_routes = {"/" + name: ROOT / "browser" / name for name in ("runtime.js", "python-worker.js", "archive.js", "browser_api.py", "webcheck-client.js")}
+        browser_routes.update({"/" + name: ROOT / name for name in ("archive_adapter.py", "policy_checks.py", "engine.py", "importers.py", "reports.py")})
+        browser_routes["/webcheck-config.json"] = ROOT / "deployment/webcheck-config.json"
         runtime_names = ("pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json", "LICENSE.pyodide", "LICENSE.cpython")
         browser_routes.update({"/vendor/pyodide/" + name: ROOT / "vendor" / "pyodide" / name for name in runtime_names})
         if path in browser_routes:

@@ -33,10 +33,12 @@ jobs:
           node --test browser/test_runtime.js
           python browser/generate_zip64_fixtures.py --check
           node --test browser/test_archive.js
+          node --test browser/test_webcheck_client.js
           node --check static/app.js
           node --check browser/runtime.js
           node --check browser/python-worker.js
           node --check browser/archive.js
+          node --check browser/webcheck-client.js
       - name: Build allowlisted static site
         run: python build_site.py --output _site --download-runtime
       - name: Upload Pages artifact

@@ -3,7 +3,7 @@
 // A fixed, same-origin runtime is supplied by the static-site build.
 const PYODIDE_VERSION = '0.27.7';
 const RUNTIME_URL = new URL('./vendor/pyodide/', self.location.href).href;
-const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'archive_adapter.py', 'browser_api.py'];
+const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'policy_checks.py', 'archive_adapter.py', 'browser_api.py'];
 let python = null;
 let ready = false;
 let queue = Promise.resolve();
@@ -36,7 +36,7 @@ async function initialize() {
 import sys
 sys.path.insert(0, '/app')
 import hashlib, zlib
-from browser_api import dispatch_json, prepare_archive_json, finish_archive_json, clear_archive
+from browser_api import dispatch_json, prepare_archive_json, finish_archive_json, clear_archive, clear_prepared_archive
 dispatch_json('{"path":"/api/health","data":{}}')
 `);
     const health = JSON.parse(healthJSON);
@@ -117,7 +117,9 @@ async function processArchive(message) {
     return;
   }
   const archiveProgress = value => self.postMessage({type: 'progress', id: message.id, message: String(value)});
+  let completed = false;
   try {
+    python.runPython('clear_archive()');
     const options = {onProgress: archiveProgress};
     try { new DecompressionStream('deflate-raw'); }
     catch { options.inflateRaw = inflateRaw; }
@@ -139,11 +141,12 @@ async function processArchive(message) {
     try { resultJSON = python.runPython('finish_archive_json(_archive_media_json)'); }
     finally { python.globals.delete('_archive_media_json'); }
     if (typeof resultJSON !== 'string') throw new Error('归档分析返回数据异常。');
+    completed = JSON.parse(resultJSON).ok === true;
     self.postMessage({type: 'result', id: message.id, result_json: resultJSON});
   } catch (error) {
     self.postMessage({type: 'result', id: message.id, result_json: JSON.stringify({ok: false, error: error instanceof Error ? error.message : '归档处理失败；未进行部分分析。'})});
   } finally {
-    try { python.runPython('clear_archive()'); } catch { /* Worker stop handles runtime failure. */ }
+    try { python.runPython(completed ? 'clear_prepared_archive()' : 'clear_archive()'); } catch { /* Worker stop handles runtime failure. */ }
   }
 }
 

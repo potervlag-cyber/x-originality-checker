@@ -25,6 +25,30 @@ def request(path, data=None):
 
 
 class BrowserAdapterTests(unittest.TestCase):
+    def setUp(self):
+        browser_api.clear_archive()
+        self.addCleanup(browser_api.clear_archive)
+
+    def archive(self, records):
+        data = {"files": [{"name": "data/tweets.js", "text": 'window.YTD.tweets.part0 = ' + json.dumps([{"tweet": item} for item in records]) + ';'}]}
+        prepared = json.loads(browser_api.prepare_archive_json(json.dumps(data)))
+        self.assertTrue(prepared["ok"], prepared)
+        finished = json.loads(browser_api.finish_archive_json('{"hashes":[]}'))
+        self.assertTrue(finished["ok"], finished)
+        return finished["result"]
+
+    def report(self, post_id, status="no_match", matches=None, **extra):
+        return {"schema_version": 1, "provider": "fixture", "checked_at": "2026-10-07T01:00:00Z", "posts": [{
+            "id": post_id, "status": status, "query_count": 2, "successful_queries": 0 if status in {"failed", "skipped"} else 2,
+            "candidates_found": len(matches or []), "sources_checked": len(matches or []), "matches": matches or [],
+            "same_post": [], "issues": [], "max_similarity": max((m["score"] for m in matches or []), default=None), **extra}]}
+
+    def match(self, **extra):
+        return {"url": "https://example.com/article", "title": "公开来源", "score": 0.93,
+            "matched_chars": 40, "post_excerpt": TEXT[:40], "source_excerpt": TEXT[:40],
+            "published_at": "2026-10-01", "published_at_basis": "page_metadata", "temporal_relation": "earlier",
+            "source_kind": "page_body", "page_status": "fetched", "source_text_truncated": False, **extra}
+
     def test_health_contains_version_but_no_local_token(self):
         response = request("/api/health")
         self.assertTrue(response["ok"])
@@ -95,7 +119,7 @@ class BrowserAdapterTests(unittest.TestCase):
             self.assertFalse(response["ok"])
             self.assertNotIn("private secret", response["error"])
 
-    def test_archive_protocol_keeps_full_posts_in_worker_and_clears_state(self):
+    def test_archive_protocol_retains_text_for_web_check_but_clears_prepared_state(self):
         data = {"files": [{"name": "data/tweets.js", "text": 'window.YTD.tweets.part0 = ' + json.dumps([{"tweet": {"id_str": "123456789", "full_text": TEXT}}]) + ';'}], "metadata": {"zip_entries": 20000}}
         prepared = json.loads(browser_api.prepare_archive_json(json.dumps(data)))
         self.assertTrue(prepared["ok"])
@@ -112,12 +136,135 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(summary["probability_model"]["calibrated"])
         self.assertEqual(summary["estimated_probability"], sum(factor["impact_points"] for factor in finished["result"]["probability_factors"]))
         self.assertIsNone(browser_api._prepared_archive)
+        self.assertIsNotNone(browser_api._retained_archive)
+        self.assertNotIn("posts", finished["result"])
+        self.assertEqual("not_started", finished["result"]["web_check"]["status"])
         self.assertFalse(json.loads(browser_api.finish_archive_json('{}'))["ok"])
+        self.assertIsNone(browser_api._retained_archive)
 
     def test_archive_input_failure_never_leaves_previous_material(self):
         browser_api._prepared_archive = {"old": "old private archive"}
         self.assertFalse(json.loads(browser_api.prepare_archive_json('not json'))["ok"])
         self.assertIsNone(browser_api._prepared_archive)
+
+    def test_plan_uses_all_eligible_posts_in_archive_order_and_only_text_fields(self):
+        self.archive([
+            {"id_str": "123456701", "full_text": TEXT, "created_at": "2020-01-01", "screen_name": "PRIVATE_ACCOUNT", "unrelated": "PRIVATE_DATA"},
+            {"id_str": "123456702", "full_text": TEXT, "retweeted_status_id_str": "9"},
+            {"id_str": "123456703", "full_text": "短帖"},
+            {"id_str": "123456704", "full_text": TEXT, "truncated": True},
+            {"id_str": "123456705", "full_text": TEXT * 100, "in_reply_to_status_id_str": "8"},
+        ])
+        first = request("/api/webcheck/plan", {"limit": 1})["result"]
+        self.assertEqual(2, first["total_eligible"])
+        self.assertEqual("123456701", first["posts"][0]["id"])
+        self.assertFalse(first["done"])
+        last = request("/api/webcheck/plan", {"offset": first["next_offset"], "limit": 10, "max_chars": 100})["result"]
+        self.assertEqual(first["session_id"], last["session_id"])
+        self.assertTrue(last["done"])
+        post = last["posts"][0]
+        self.assertEqual("123456705", post["id"])
+        self.assertEqual(100, len(post["text"]))
+        self.assertTrue(post["text_truncated"])
+        self.assertEqual(len(TEXT) * 100, post["original_chars"])
+        self.assertEqual({"id", "text", "url", "created_at", "original_chars", "text_truncated"}, set(post))
+        self.assertNotIn("PRIVATE", json.dumps(first))
+        for invalid in ({"offset": -1}, {"offset": 3}, {"limit": 11}, {"limit": True}, {"max_chars": 5001}, {"max_chars": 0}):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(request("/api/webcheck/plan", invalid)["ok"])
+
+    def test_apply_merges_batches_without_reanalysis_and_reports_partial_failure(self):
+        base = self.archive([{"id_str": str(123456700 + i), "full_text": TEXT + str(i)} for i in range(3)])
+        plan = request("/api/webcheck/plan")["result"]
+        with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun full archive")):
+            matched = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][0]["id"], "matched", [self.match()])})
+        self.assertTrue(matched["ok"], matched)
+        self.assertEqual(base["summary"], matched["result"]["summary"])
+        self.assertIsNone(matched["result"]["summary"]["official_probability"])
+        self.assertIn("policy_checks", matched["result"])
+        self.assertFalse(any("未做全网查重" in text for text in matched["result"]["limitations"]))
+        failed_report = self.report(plan["posts"][1]["id"], "failed", issues=[{"code": "provider_unavailable"}], checked_chars=0)
+        failed = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": failed_report})["result"]
+        coverage = failed["web_check"]["coverage"]
+        self.assertEqual((2, 1, 1, 1, 1), tuple(coverage[key] for key in ("requested", "searched", "failed", "matched", "remaining")))
+        self.assertEqual("unknown", coverage["web_coverage"])
+        self.assertFalse(coverage["search_complete"])
+        # Retrying a post updates its evidence, without double-counting the post.
+        retry = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][1]["id"])})["result"]
+        self.assertEqual(2, retry["web_check"]["coverage"]["requested"])
+        self.assertEqual(0, retry["web_check"]["coverage"]["failed"])
+
+    def test_apply_keeps_local_truncation_and_snippet_unknowns(self):
+        self.archive([{"id_str": "123456789", "full_text": TEXT * 100}])
+        plan = request("/api/webcheck/plan", {"max_chars": 100})["result"]
+        match = self.match(source_kind="search_snippet", page_status="source_http_403", source_text_truncated=None, published_at=None, published_at_basis=None, temporal_relation="unknown")
+        report = self.report("123456789", "partial", [match], original_chars=100, checked_chars=100, text_truncated=False, sources_checked=0, issues=[{"code": "source_http_403"}])
+        result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(result["ok"], result)
+        post = result["result"]["web_check"]["posts"][0]
+        self.assertTrue(post["text_truncated"])
+        self.assertEqual(len(TEXT) * 100, post["original_chars"])
+        self.assertIsNone(post["matches"][0]["source_text_truncated"])
+        self.assertFalse(result["result"]["web_check"]["coverage"]["search_complete"])
+
+    def test_unmatched_truncated_text_is_partial_and_match_totals_are_preserved(self):
+        self.archive([{"id_str": "123456789", "full_text": TEXT * 100}])
+        plan = request("/api/webcheck/plan", {"max_chars": 100})["result"]
+        report = self.report("123456789", checked_chars=100, original_chars=100, text_truncated=False)
+        result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(result["ok"], result)
+        web = result["result"]["web_check"]
+        self.assertEqual("partial", web["posts"][0]["status"])
+        self.assertEqual(1, web["coverage"]["text_truncated_posts"])
+        self.assertFalse(web["coverage"]["search_complete"])
+        policy = next(row for row in result["result"]["policy_checks"]["requirements"] if row["id"] == "original_contribution")
+        self.assertEqual(0, policy["assessed_count"])
+        self.assertEqual(1, policy["unknown_count"])
+        report = self.report("123456789", "matched", [self.match()] * 3, matches_total=5, checked_chars=100)
+        result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(5, result["result"]["web_check"]["posts"][0]["matches_total"])
+        for invalid in (2, True, -1, 1001):
+            report["posts"][0]["matches_total"] = invalid
+            self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
+
+    def test_unplanned_ids_stale_sessions_and_bad_evidence_do_not_mutate_state(self):
+        self.archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT + "新增"}])
+        plan = request("/api/webcheck/plan", {"limit": 1})["result"]
+        payload = {"session_id": plan["session_id"], "report": self.report("123456790")}
+        self.assertFalse(request("/api/webcheck/apply", payload)["ok"])
+        self.assertFalse(request("/api/webcheck/apply", {**payload, "session_id": "old-session"})["ok"])
+        bad_urls = ["file:///private", "https://user:password@example.com/source", "http://localhost/source", "http://127.0.0.1/source", "http://10.0.0.1/source", "http://[::1]/source", "http://169.254.169.254/source", "http://2130706433/source", "http://127.1/source", "http://0x7f000001/source", "https://example.com\\source", "https://example.com/\nsource"]
+        for url in bad_urls:
+            with self.subTest(url=url):
+                report = self.report("123456789", "matched", [self.match(url=url)])
+                self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
+        self.assertEqual({}, browser_api._retained_archive["web_posts"])
+        report = self.report("123456789", "matched", [self.match()] * 4)
+        self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
+        report = self.report("123456789", "matched", [self.match()])
+        with patch.object(browser_api, "assess_policy", side_effect=RuntimeError("private error")):
+            failed = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertFalse(failed["ok"])
+        self.assertNotIn("private error", failed["error"])
+        self.assertEqual({}, browser_api._retained_archive["web_posts"])
+        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        new = request("/api/webcheck/plan")["result"]
+        self.assertNotEqual(plan["session_id"], new["session_id"])
+        self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
+
+    def test_clear_and_new_archive_failures_remove_all_retained_content(self):
+        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.assertTrue(request("/api/archive/clear")["result"]["cleared"])
+        self.assertIsNone(browser_api._retained_archive)
+        self.assertFalse(request("/api/webcheck/plan")["ok"])
+        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.assertFalse(json.loads(browser_api.prepare_archive_json("not-json"))["ok"])
+        self.assertIsNone(browser_api._retained_archive)
+        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.assertFalse(json.loads(browser_api.finish_archive_json("not-json"))["ok"])
+        self.assertIsNone(browser_api._prepared_archive)
+        self.assertIsNone(browser_api._retained_archive)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 from engine import analyze, _clean
 from importers import ImportErrorDetail, MAX_ARCHIVE_POSTS, _safe_member, normalize_project
+from policy_checks import assess_policy
 
 POST_FILE = re.compile(r"(?:tweets?|posts?)(?:[-_]part\d+)?\.(?:js|json)$", re.I)
 ASSIGNMENT = re.compile(r"\s*window\.YTD\.(?:tweets?|posts?)(?:_part\d+)?\.part\d+\s*=\s*")
@@ -346,6 +347,8 @@ def finish_archive(prepared, media_result=None):
                     break
     result = analyze(project, full_archive=True, compact=True)
     assessed = result["posts"]
+    # Retain detailed evidence only inside the worker for optional web checks.
+    prepared["_assessed_posts"] = assessed
     # Count each affected post once, even when several evidence records match.
     codes = Counter()
     for post in assessed:
@@ -399,6 +402,7 @@ def finish_archive(prepared, media_result=None):
         "media_references": coverage["media_references"], "hashed_media": coverage["hashed_media"],
         "media_completeness_percent": round(coverage["hashed_media"] / coverage["media_references"] * 100, 1) if coverage["media_references"] else None,
         "thread_groups": prepared["thread_groups"], "analyzed_all_archive_posts": True},
+        "policy_checks": assess_policy(project["posts"], assessed),
         "probability_factors": probability_factors, "reasons": reasons, "examples": examples, "coverage": {
             "actual_start": coverage["actual_start"], "actual_end": coverage["actual_end"], "post_files": len(prepared["post_files"]), "post_file_names": prepared["post_files"],
             "archive_records": prepared["archive_records"], "analyzed_posts": len(assessed),

@@ -149,7 +149,7 @@ test('worker loads only same-origin trusted modules and dispatches serial JSON s
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(initialScript, 'https://example.test/project/vendor/pyodide/pyodide.js');
-  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['archive_adapter.py', 'browser_api.py', 'engine.py', 'importers.py', 'reports.py']);
+  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['archive_adapter.py', 'browser_api.py', 'engine.py', 'importers.py', 'policy_checks.py', 'reports.py']);
   assert.equal(sent.at(-1).type, 'ready');
   self.onmessage({data: {type: 'request', id: 1, request_json: '{"path":"/api/analyze","data":{}}'}});
   self.onmessage({data: {type: 'request', id: 2, request_json: '{"path":"/api/report","data":{}}'}});
@@ -192,4 +192,63 @@ test('archive facade validates 300 MiB boundary and permits cancellation/retry',
   workers[1].emit('message', {type: 'ready', version: '0.1.0'});
   await restarted;
   assert.equal(runtime.ready, true);
+});
+
+test('web plan apply and archive clear stay in the local worker protocol', async () => {
+  const {runtime, workers} = await initialized();
+  for (const path of ['/api/webcheck/plan', '/api/webcheck/apply', '/api/archive/clear']) {
+    const data = path.endsWith('apply') ? {session_id: 'archive-session', report: {posts: []}} : {};
+    const promise = runtime.request(path, data);
+    const sent = workers[0].sent.at(-1);
+    const request = JSON.parse(sent.request_json);
+    assert.equal(request.path, path);
+    assert.deepEqual(request.data, data);
+    workers[0].emit('message', {type: 'result', id: sent.id, result_json: '{"ok":true,"result":{"accepted":true}}'});
+    assert.equal((await promise).accepted, true);
+  }
+  assert.equal(workers[0].terminated, false);
+});
+
+test('worker retains a successful archive and clears every failed replacement', async () => {
+  const sent = [];
+  const calls = [];
+  const globals = new Map();
+  let failArchive = false;
+  const self = {
+    location: {href: 'https://example.test/project/python-worker.js'},
+    postMessage(message) { sent.push(message); },
+    ArchiveZip: {async open() {
+      if (failArchive) throw new Error('invalid archive');
+      return {metadata: {}, noteEntries: [], async readPostFiles() { return [{name: 'data/tweets.js', text: 'public text'}]; }, async hashMedia() { return {hashes: []}; }};
+    }},
+  };
+  const python = {
+    version: '0.27.7', FS: {mkdirTree() {}, writeFile() {}}, globals,
+    runPython(code) {
+      calls.push(code);
+      if (code.includes('sys.path.insert')) return '{"ok":true,"result":{"version":"0.1.0"}}';
+      if (code.startsWith('prepare_archive_json(')) return '{"ok":true,"result":{"media_names":[]}}';
+      if (code.startsWith('finish_archive_json(')) return '{"ok":true,"result":{"summary":{"total":1}}}';
+      return null;
+    },
+  };
+  vm.runInNewContext(workerSource, {
+    self, URL, importScripts() {}, async loadPyodide() { return python; },
+    async fetch() { return {ok: true, async text() { return '# trusted local module'; }}; },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  calls.length = 0;
+  self.onmessage({data: {type: 'archive', id: 1, file: {}}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(code => code === 'clear_archive()').length, 1);
+  assert.equal(calls.at(-1), 'clear_prepared_archive()');
+  assert.equal(JSON.parse(sent.at(-1).result_json).ok, true);
+  assert.equal(globals.size, 0);
+  failArchive = true;
+  calls.length = 0;
+  self.onmessage({data: {type: 'archive', id: 2, file: {}}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(code => code === 'clear_archive()').length, 2);
+  assert.equal(calls.at(-1), 'clear_archive()');
+  assert.equal(JSON.parse(sent.at(-1).result_json).ok, false);
 });
