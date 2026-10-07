@@ -12,8 +12,50 @@ import json
 from engine import VERSION, analyze
 from importers import MAX_FILE_BYTES, import_data, normalize_project
 from reports import html_report, markdown_report
+from archive_adapter import prepare_archive, finish_archive
 
 MAX_REQUEST_BYTES = 45 * 1024 * 1024
+_prepared_archive = None
+
+
+def prepare_archive_json(payload_json):
+    """Keep the full archive in the worker; return only requested media names."""
+    global _prepared_archive
+    _prepared_archive = None
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("归档请求需要包含对象。")
+        _prepared_archive = prepare_archive(payload.get("files"), payload.get("metadata"))
+        response = {"ok": True, "result": {"media_names": _prepared_archive["media_names"]}}
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError) as exc:
+        response = {"ok": False, "error": str(exc)}
+    except Exception:
+        response = {"ok": False, "error": "归档帖子解析失败；未进行部分分析。"}
+    return json.dumps(response, ensure_ascii=False)
+
+
+def finish_archive_json(media_json):
+    global _prepared_archive
+    try:
+        if _prepared_archive is None:
+            raise ValueError("尚未准备归档帖子。")
+        media = json.loads(media_json)
+        if not isinstance(media, dict):
+            raise ValueError("归档媒体结果格式异常。")
+        response = {"ok": True, "result": finish_archive(_prepared_archive, media)}
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError) as exc:
+        response = {"ok": False, "error": str(exc)}
+    except Exception:
+        response = {"ok": False, "error": "归档分析失败；未给出部分分析结果。"}
+    finally:
+        _prepared_archive = None
+    return json.dumps(response, ensure_ascii=False)
+
+
+def clear_archive():
+    global _prepared_archive
+    _prepared_archive = None
 
 
 def _dispatch(path, data):

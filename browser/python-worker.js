@@ -3,7 +3,7 @@
 // A fixed, same-origin runtime is supplied by the static-site build.
 const PYODIDE_VERSION = '0.27.7';
 const RUNTIME_URL = new URL('./vendor/pyodide/', self.location.href).href;
-const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'browser_api.py'];
+const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'archive_adapter.py', 'browser_api.py'];
 let python = null;
 let ready = false;
 let queue = Promise.resolve();
@@ -20,6 +20,7 @@ function failure(message) {
 async function initialize() {
   try {
     progress('正在加载浏览器 Python 引擎，首次打开需要一些时间…');
+    importScripts(new URL('archive.js', self.location.href).href);
     importScripts(new URL('pyodide.js', RUNTIME_URL).href);
     python = await loadPyodide({indexURL: RUNTIME_URL});
     if (python.version !== PYODIDE_VERSION) throw new Error('Runtime version mismatch');
@@ -34,7 +35,8 @@ async function initialize() {
     const healthJSON = python.runPython(`
 import sys
 sys.path.insert(0, '/app')
-from browser_api import dispatch_json
+import hashlib, zlib
+from browser_api import dispatch_json, prepare_archive_json, finish_archive_json, clear_archive
 dispatch_json('{"path":"/api/health","data":{}}')
 `);
     const health = JSON.parse(healthJSON);
@@ -43,6 +45,105 @@ dispatch_json('{"path":"/api/health","data":{}}')
     self.postMessage({type: 'ready', version: health.result.version, pythonVersion: PYODIDE_VERSION});
   } catch {
     failure('浏览器引擎加载失败。请检查网络连接并重新加载页面；材料没有上传。');
+  }
+}
+
+function createHasher() {
+  const digest = python.runPython('hashlib.sha256()');
+  let closed = false;
+  return {
+    update(chunk) {
+      const converted = python.toPy(chunk);
+      try { digest.update(converted); }
+      finally { converted.destroy(); }
+    },
+    digest() {
+      try { return digest.hexdigest(); }
+      finally { if (!closed) digest.destroy(); closed = true; }
+    },
+    dispose() { if (!closed) digest.destroy(); closed = true; },
+  };
+}
+
+// Older browsers without native raw DEFLATE can still stream via stdlib zlib.
+// max_length bounds each emitted block rather than materializing an expanded file.
+function inflateRaw(stream, entry) {
+  const input = stream.getReader();
+  const inflater = python.runPython('zlib.decompressobj(-15)');
+  let destroyed = false;
+  let pendingBytes = new Uint8Array(0);
+  let expanded = 0;
+  const cleanup = () => { if (!destroyed) inflater.destroy(); destroyed = true; };
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        while (true) {
+          if (!pendingBytes.byteLength) {
+            const {value, done} = await input.read();
+            if (done) {
+              if (!inflater.eof) throw new Error('ZIP 解压数据不完整。');
+              cleanup(); controller.close(); return;
+            }
+            pendingBytes = value;
+          }
+          const converted = python.toPy(pendingBytes);
+          let output;
+          let tail;
+          let extra;
+          let block;
+          try {
+            output = inflater.decompress(converted, 65536);
+            tail = inflater.unconsumed_tail;
+            extra = inflater.unused_data;
+            block = output.toJs();
+            pendingBytes = tail.toJs();
+            if (extra.toJs().byteLength) throw new Error('ZIP 压缩条目含额外数据。');
+          } finally {
+            converted.destroy(); output?.destroy(); tail?.destroy(); extra?.destroy();
+          }
+          expanded += block.byteLength;
+          if (expanded > entry.size) throw new Error('ZIP 展开长度超过声明，已停止解压。');
+          if (block.byteLength) { controller.enqueue(block); return; }
+        }
+      } catch (error) { cleanup(); controller.error(error); await input.cancel(); }
+    },
+    async cancel(reason) { cleanup(); await input.cancel(reason); },
+  });
+}
+
+async function processArchive(message) {
+  if (!ready || !python) {
+    self.postMessage({type: 'result', id: message.id, result_json: JSON.stringify({ok: false, error: '浏览器引擎尚未就绪。'})});
+    return;
+  }
+  const archiveProgress = value => self.postMessage({type: 'progress', id: message.id, message: String(value)});
+  try {
+    const options = {onProgress: archiveProgress};
+    try { new DecompressionStream('deflate-raw'); }
+    catch { options.inflateRaw = inflateRaw; }
+    const reader = await self.ArchiveZip.open(message.file, options);
+    archiveProgress('正在解压全部发帖分片…');
+    let files = await reader.readPostFiles();
+    python.globals.set('_archive_json', JSON.stringify({files, metadata: {...reader.metadata, unread_note_files: reader.noteEntries.length}}));
+    files = null;
+    let prepared;
+    try { prepared = JSON.parse(python.runPython('prepare_archive_json(_archive_json)')); }
+    finally { python.globals.delete('_archive_json'); }
+    if (!prepared.ok) throw new Error(prepared.error);
+    archiveProgress('正在核对归档中关联的媒体文件…');
+    const media = await reader.hashMedia(prepared.result.media_names, {createHasher, onProgress: archiveProgress});
+    prepared = null;
+    archiveProgress('正在分析全部帖子正文与重复信号…');
+    python.globals.set('_archive_media_json', JSON.stringify(media));
+    let resultJSON;
+    try { resultJSON = python.runPython('finish_archive_json(_archive_media_json)'); }
+    finally { python.globals.delete('_archive_media_json'); }
+    if (typeof resultJSON !== 'string') throw new Error('归档分析返回数据异常。');
+    self.postMessage({type: 'result', id: message.id, result_json: resultJSON});
+  } catch (error) {
+    self.postMessage({type: 'result', id: message.id, result_json: JSON.stringify({ok: false, error: error instanceof Error ? error.message : '归档处理失败；未进行部分分析。'})});
+  } finally {
+    try { python.runPython('clear_archive()'); } catch { /* Worker stop handles runtime failure. */ }
   }
 }
 
@@ -58,7 +159,7 @@ async function processRequest(message) {
     if (typeof resultJSON !== 'string') throw new Error('Adapter result must be a string');
     self.postMessage({type: 'result', id: message.id, result_json: resultJSON});
   } catch {
-    failure('浏览器引擎处理失败。请保存当前项目并重新加载页面；材料没有上传。');
+    failure('浏览器引擎处理失败。请重新加载页面并重新选择归档；材料没有上传。');
   } finally {
     try { python.globals.delete('_browser_request_json'); } catch { /* A failed WASM runtime may already be unavailable. */ }
   }
@@ -66,8 +167,12 @@ async function processRequest(message) {
 
 self.onmessage = event => {
   const message = event.data;
-  if (!message || message.type !== 'request' || !Number.isSafeInteger(message.id) || typeof message.request_json !== 'string') return;
-  queue = queue.then(() => processRequest(message));
+  if (!message || !Number.isSafeInteger(message.id)) return;
+  if (message.type === 'archive') {
+    queue = queue.then(() => processArchive(message));
+  } else if (message.type === 'request' && typeof message.request_json === 'string') {
+    queue = queue.then(() => processRequest(message));
+  }
 };
 
 initialize();

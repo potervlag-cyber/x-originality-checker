@@ -149,7 +149,7 @@ test('worker loads only same-origin trusted modules and dispatches serial JSON s
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(initialScript, 'https://example.test/project/vendor/pyodide/pyodide.js');
-  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['browser_api.py', 'engine.py', 'importers.py', 'reports.py']);
+  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['archive_adapter.py', 'browser_api.py', 'engine.py', 'importers.py', 'reports.py']);
   assert.equal(sent.at(-1).type, 'ready');
   self.onmessage({data: {type: 'request', id: 1, request_json: '{"path":"/api/analyze","data":{}}'}});
   self.onmessage({data: {type: 'request', id: 2, request_json: '{"path":"/api/report","data":{}}'}});
@@ -159,4 +159,37 @@ test('worker loads only same-origin trusted modules and dispatches serial JSON s
   assert.equal(JSON.parse(results[0].result_json).result.path, '/api/analyze');
   assert.equal(JSON.parse(results[1].result_json).result.path, '/api/report');
   assert.equal(pythonGlobals.has('_browser_request_json'), false);
+});
+
+test('archive facade passes a File directly and routes progress to its request', async () => {
+  const {runtime, workers, timers} = await initialized();
+  const progress = [];
+  const file = {name: 'x-archive.zip', size: 300 * 1024 * 1024, slice() { throw new Error('Main thread must never read the File'); }};
+  const request = runtime.inspectArchive(file, message => progress.push(message));
+  const sent = workers[0].sent[0];
+  assert.equal(sent.type, 'archive');
+  assert.equal(sent.file, file);
+  assert.equal(Object.hasOwn(sent, 'request_json'), false);
+  workers[0].emit('message', {type: 'progress', id: sent.id, message: '正在扫描分片'});
+  workers[0].emit('message', {type: 'result', id: sent.id, result_json: '{"ok":true,"result":{"summary":{"total":2601,"official_probability":null}}}'});
+  assert.equal((await request).summary.total, 2601);
+  assert.deepEqual(progress, ['正在扫描分片']);
+  assert.equal(timers.size, 0);
+});
+
+test('archive facade validates 300 MiB boundary and permits cancellation/retry', async () => {
+  const {runtime, workers} = await initialized();
+  await assert.rejects(runtime.inspectArchive({name: 'x.zip', size: 300 * 1024 * 1024 + 1, slice() {}}), /300 MB/);
+  await assert.rejects(runtime.inspectArchive({name: 'x.json', size: 5, slice() {}}), /ZIP/);
+  assert.equal(workers[0].sent.length, 0);
+  const file = {name: 'x.zip', size: 50, slice() {}};
+  const pending = assert.rejects(runtime.inspectArchive(file), /已停止/);
+  await assert.rejects(runtime.inspectArchive(file), /已有材料/);
+  await runtime.request('/api/shutdown');
+  await pending;
+  assert.equal(workers[0].terminated, true);
+  const restarted = runtime.init();
+  workers[1].emit('message', {type: 'ready', version: '0.1.0'});
+  await restarted;
+  assert.equal(runtime.ready, true);
 });

@@ -11,6 +11,11 @@ from collections import Counter, defaultdict
 from importers import normalize_project
 
 VERSION = "0.1.0"
+MAX_RELATED_EVIDENCE = 8
+MAX_NEAR_REASONS = 8
+MAX_NEAR_COMPARISONS = 100000
+MAX_INDEX_GRAMS = 250000
+MAX_INDEX_POSTINGS = 2000000
 STATUS_LABELS = {"high_risk": "高风险材料", "review": "需人工复核", "insufficient": "材料不足", "low_signal": "未发现明显文本风险"}
 LIMITATIONS = [
     "本工具是离线材料初评，未接入 X 的内部审核；与官方结果的一致性尚未验证，不提供通过概率。",
@@ -119,9 +124,9 @@ def _reason(code, message, evidence=None):
     return {"code": code, "message": message, "evidence": evidence or {}}
 
 
-def analyze(project):
+def analyze(project, *, full_archive=False, compact=False):
     """Return auditable, mutually exclusive material statuses and at most ten candidates."""
-    project = normalize_project(project)
+    project = normalize_project(project, full_archive=full_archive)
     posts, outside, invalid_dates, zone = _window(project)
     checks = {p["id"]: [] for p in posts}
     statuses = {p["id"]: set() for p in posts}
@@ -141,25 +146,47 @@ def analyze(project):
         if len(ids) < 2:
             continue
         for post_id in ids:
-            other = [i for i in ids if i != post_id]
-            add(post_id, "high_risk", "internal_exact", "与本次账号材料中的其他帖子正文完全或仅标点/链接不同；需核对重复发布原因。", {"related_posts": other})
+            # Evidence samples remain bounded even for an archive with thousands
+            # of identical posts; the total keeps the finding auditable.
+            other = [i for i in ids[:MAX_RELATED_EVIDENCE + 1] if i != post_id][:MAX_RELATED_EVIDENCE]
+            add(post_id, "high_risk", "internal_exact", "与本次账号材料中的其他帖子正文完全或仅标点/链接不同；需核对重复发布原因。", {"related_posts": other, "related_posts_total": len(ids) - 1})
             duplicates.add(post_id)
 
     # An inverted 4-character index avoids unbounded all-pairs difflib comparisons.
     gram_index = defaultdict(list)
     gram_sets = {}
     comparison_limited = False
+    near_comparisons = 0
+    index_postings = 0
+    near_reason_counts = Counter()
+    indexed_exact = set()
     for post in posts:
         post_id, text = post["id"], clean[post["id"]]
         if len(text) < 40 or post["type"] == "repost":
             continue
+        if text in indexed_exact:
+            continue
+        indexed_exact.add(text)
+        if near_comparisons >= MAX_NEAR_COMPARISONS or index_postings >= MAX_INDEX_POSTINGS:
+            comparison_limited = True
+            continue
         grams = _grams(text)
+        if len(grams) > 512:
+            grams = set(sorted(grams)[:512])
+            comparison_limited = True
         gram_sets[post_id] = grams
         counts = Counter()
+        count_updates = 0
         for gram in grams:
-            prior = gram_index[gram]
+            prior = gram_index.get(gram, [])
             if len(prior) <= 150:
                 counts.update(prior)
+                count_updates += len(prior)
+                if count_updates >= 5000:
+                    comparison_limited = True
+                    break
+            else:
+                comparison_limited = True
         possible = [prior for prior, count in counts.most_common(120)
                     if count / max(min(len(grams), len(gram_sets[prior])), 1) >= 0.5]
         if len(counts) > 120:
@@ -168,13 +195,26 @@ def analyze(project):
             if clean[prior] == text:
                 continue
             similarity = _similarity(text, clean[prior])
+            near_comparisons += 1
             if similarity >= 0.84:
                 for target, other in ((post_id, prior), (prior, post_id)):
-                    add(target, "review", "internal_near", "与账号材料中的其他帖子高度相似；改写、重复模板或再发布原因需人工复核。", {"related_posts": [other], "comparison_similarity": round(similarity, 3)})
+                    near_reason_counts[target] += 1
+                    if near_reason_counts[target] <= MAX_NEAR_REASONS:
+                        add(target, "review", "internal_near", "与账号材料中的其他帖子高度相似；改写、重复模板或再发布原因需人工复核。", {"related_posts": [other], "comparison_similarity": round(similarity, 3)})
                     duplicates.add(target)
+            if near_comparisons >= MAX_NEAR_COMPARISONS:
+                comparison_limited = True
+                break
         for gram in grams:
+            if gram not in gram_index and len(gram_index) >= MAX_INDEX_GRAMS:
+                comparison_limited = True
+                continue
+            if index_postings >= MAX_INDEX_POSTINGS:
+                comparison_limited = True
+                break
             if len(gram_index[gram]) <= 150:
                 gram_index[gram].append(post_id)
+                index_postings += 1
 
     media_index = defaultdict(list)
     for post in posts:
@@ -185,7 +225,7 @@ def analyze(project):
         ids = sorted({entry[0] for entry in entries})
         if len(ids) >= 2:
             for post_id in ids:
-                add(post_id, "review", "media_same_hash", "与其他帖子提供的媒体具有相同 SHA-256；重复使用、本人再发布或他人来源需核实，不能据此认定搬运。", {"related_posts": [i for i in ids if i != post_id], "hash": digest})
+                add(post_id, "review", "media_same_hash", "与其他帖子提供的媒体具有相同 SHA-256；重复使用、本人再发布或他人来源需核实，不能据此认定搬运。", {"related_posts": [i for i in ids[:MAX_RELATED_EVIDENCE + 1] if i != post_id][:MAX_RELATED_EVIDENCE], "related_posts_total": len(ids) - 1, "hash": digest})
 
     threads = defaultdict(list)
     for post in posts:
@@ -295,8 +335,9 @@ def analyze(project):
         item = {**post, "status": status, "status_label": STATUS_LABELS[status], "reasons": reasons,
                 "candidate_eligible": eligible, "candidate_reason": candidate_reason}
         results.append(item)
-        findings.extend({"post_id": post_id, **reason} for reason in reasons)
-        if eligible:
+        if not compact:
+            findings.extend({"post_id": post_id, **reason} for reason in reasons)
+        if eligible and not compact:
             # This is sorting support, never a numerical official score/probability.
             support = (bool(post["contribution"]), bool(post["evidence"]), bool(post["sources"]), min(len(clean[post_id]), 2000))
             pool.append((support, item))
@@ -339,7 +380,8 @@ def analyze(project):
                 "coverage_basis": "相对使用者声明总数的材料数量比例，不是官方检测覆盖率。" if percent is not None else "总数未知、材料矛盾或时间缺失，未计算精确覆盖率。",
                 "actual_start": actual_dates[0].isoformat() if actual_dates else "",
                 "actual_end": actual_dates[-1].isoformat() if actual_dates else "", "scope": scope,
-                "notes": coverage_notes, "approximate_comparison_limited": comparison_limited}
+                "notes": coverage_notes, "approximate_comparison_limited": comparison_limited,
+                "near_comparisons": near_comparisons, "near_comparison_budget": MAX_NEAR_COMPARISONS}
     filtered_project = {**project, "posts": posts}
     return {"version": VERSION, "summary": {"total": len(posts), "counts": counts,
             "distinct_candidates": len(candidates), "candidate_pool": len(pool),

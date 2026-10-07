@@ -48,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -76,9 +76,16 @@ class Handler(BaseHTTPRequestHandler):
             if not source.is_file():
                 source = ROOT / "materials" / "guide.md"
             return self.send_json({"text": source.read_text(encoding="utf-8-sig")})
-        if path == "/runtime.js":
-            source = ROOT / "browser" / "runtime.js"
-            return self.response(source.read_bytes(), "text/javascript; charset=utf-8")
+        browser_routes = {"/" + name: ROOT / "browser" / name for name in ("runtime.js", "python-worker.js", "archive.js", "browser_api.py")}
+        browser_routes.update({"/" + name: ROOT / name for name in ("archive_adapter.py", "engine.py", "importers.py", "reports.py")})
+        runtime_names = ("pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json", "LICENSE.pyodide", "LICENSE.cpython")
+        browser_routes.update({"/vendor/pyodide/" + name: ROOT / "vendor" / "pyodide" / name for name in runtime_names})
+        if path in browser_routes:
+            source = browser_routes[path]
+            if not source.is_file():
+                return self.send_json({"error": "浏览器运行文件缺失，请先运行 build_site.py --output _site --download-runtime。"}, 500)
+            content_type = {".js": "text/javascript; charset=utf-8", ".wasm": "application/wasm", ".json": "application/json", ".zip": "application/zip"}.get(source.suffix, "text/plain; charset=utf-8")
+            return self.response(source.read_bytes(), content_type)
         routes = {"/": "index.html", "/styles.css": "styles.css", "/app.js": "app.js"}
         if path not in routes:
             return self.send_json({"error": "页面不存在。"}, 404)

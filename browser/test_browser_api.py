@@ -95,6 +95,24 @@ class BrowserAdapterTests(unittest.TestCase):
             self.assertFalse(response["ok"])
             self.assertNotIn("private secret", response["error"])
 
+    def test_archive_protocol_keeps_full_posts_in_worker_and_clears_state(self):
+        data = {"files": [{"name": "data/tweets.js", "text": 'window.YTD.tweets.part0 = ' + json.dumps([{"tweet": {"id_str": "123456789", "full_text": TEXT}}]) + ';'}], "metadata": {"zip_entries": 20000}}
+        prepared = json.loads(browser_api.prepare_archive_json(json.dumps(data)))
+        self.assertTrue(prepared["ok"])
+        self.assertEqual([], prepared["result"]["media_names"])
+        self.assertNotIn("project", prepared["result"])
+        finished = json.loads(browser_api.finish_archive_json('{"hashes":[]}'))
+        self.assertTrue(finished["ok"])
+        self.assertEqual(1, finished["result"]["summary"]["total"])
+        self.assertIsNone(finished["result"]["summary"]["official_probability"])
+        self.assertIsNone(browser_api._prepared_archive)
+        self.assertFalse(json.loads(browser_api.finish_archive_json('{}'))["ok"])
+
+    def test_archive_input_failure_never_leaves_previous_material(self):
+        browser_api._prepared_archive = {"old": "old private archive"}
+        self.assertFalse(json.loads(browser_api.prepare_archive_json('not json'))["ok"])
+        self.assertIsNone(browser_api._prepared_archive)
+
 
 if __name__ == "__main__":
     unittest.main()

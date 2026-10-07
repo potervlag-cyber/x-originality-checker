@@ -7,7 +7,7 @@
 1. 将公开源码提交到 `potervlag-cyber/x-originality-checker` 的 `main` 分支。根 README 已包含公开使用说明。
 2. 在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。
 3. 在 **Actions** 查看 **Publish browser app to GitHub Pages**。首次推送或手动 **Run workflow** 会先运行自动检查，再构建、上传并部署静态站点。
-4. 部署成功后访问 <https://potervlag-cyber.github.io/x-originality-checker/>，实际运行“体验示例”并检查导入、保存与报告功能。
+4. 部署成功后访问 <https://potervlag-cyber.github.io/x-originality-checker/>，上传虚构 X 归档 ZIP，核对自动解析、全量统计、原因和取消/更换文件。
 
 公开仓库仅需本应用源码、测试、浏览器适配、固定运行时清单、材料说明模板及工作流。不要提交用户项目、报告、真实材料、`qa`、Obsidian 暂存、凭据或本机环境路径。构建器不会复制这些文件。
 
@@ -32,8 +32,9 @@ python -m http.server 8000 --directory _site
 
 - Actions 构建与 Pages 部署均成功，公开 URL 的界面和所有同源依赖返回成功。
 - 在 `/x-originality-checker/` 路径打开页面，浏览器引擎完成初始化。
-- 使用虚构演示材料得到预期分类；导入、编辑、候选选择、项目保存恢复、HTML / Markdown 报告正常。
+- 使用虚构 X 归档 ZIP 得到预期分类；全部记录数量、帖子类型、分片及媒体关联正确，不在 2,000 条截断。
+- 300 MB 边界的有效 ZIP 可解析；超过边界明确拒绝。归档按片段读取，无整个文件 Base64 复制。
 - 导入与运行期间网络只读取站点资源，不发送用户材料。
-- 刷新或关闭前下载 JSON 保存；停止或清空当前工作区的交互符合在线版说明。
+- 分析可取消和重新开始；错误后能重新选文件。官方通过概率明确显示缺少校准依据，观测比例与概率分开。
 
 公开访问与官方审核一致性属于不同验收项；发布成功只证明该页面可以访问并完成本工具已实现的检查。

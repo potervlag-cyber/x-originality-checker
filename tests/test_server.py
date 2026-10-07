@@ -64,9 +64,9 @@ class ServerTests(unittest.TestCase):
 
     def test_static_gui_and_health_are_served_with_local_headers(self):
         for path, expected_type, marker in (
-            ("/", "text/html", "帖子与证据".encode("utf-8")),
-            ("/styles.css", "text/css", b".app-shell"),
-            ("/app.js", "text/javascript", b"/api/analyze"),
+            ("/", "text/html", "拖入 X 归档 ZIP".encode("utf-8")),
+            ("/styles.css", "text/css", b".page-shell"),
+            ("/app.js", "text/javascript", b"inspectArchive"),
         ):
             with self.subTest(path=path):
                 status, headers, body = self.request("GET", path)

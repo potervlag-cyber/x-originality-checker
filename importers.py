@@ -15,6 +15,8 @@ MAX_ZIP_ENTRIES = 5000
 MAX_POSTS = 2000
 MAX_TEXT_LENGTH = 50000
 MAX_TOTAL_TEXT = 5 * 1024 * 1024
+MAX_ARCHIVE_POSTS = 500000
+MAX_ARCHIVE_TEXT = 128 * 1024 * 1024
 
 
 class ImportErrorDetail(ValueError):
@@ -158,7 +160,7 @@ def _normalize_sources(record):
     return result
 
 
-def normalize_project(value, warnings=None):
+def normalize_project(value, warnings=None, *, full_archive=False):
     """Normalize the public contract, preserving unknown scope as unknown."""
     warnings = warnings if warnings is not None else []
     if isinstance(value, list):
@@ -174,9 +176,12 @@ def normalize_project(value, warnings=None):
         records = [value]
     if not isinstance(records, list):
         raise ImportErrorDetail("未找到有效的 posts、records 或 tweets 数组。")
-    if len(records) > MAX_POSTS:
-        raise ImportErrorDetail(f"第一版每次最多导入 {MAX_POSTS} 条帖子，请分批整理。")
-    posts, seen, invalid, text_size = [], {}, 0, 0
+    post_limit = MAX_ARCHIVE_POSTS if full_archive else MAX_POSTS
+    text_limit = MAX_ARCHIVE_TEXT if full_archive else MAX_TOTAL_TEXT
+    if len(records) > post_limit:
+        raise ImportErrorDetail(f"记录数超过本次处理上限 {post_limit} 条；未截取或只分析前几条。")
+    posts, seen, seen_ids, invalid, text_size = [], {}, set(), 0, 0
+    duplicate_imports, conflicting_ids = 0, 0
     for index, wrapper in enumerate(records, 1):
         if not isinstance(wrapper, dict):
             invalid += 1
@@ -185,27 +190,32 @@ def normalize_project(value, warnings=None):
         if not isinstance(raw, dict):
             invalid += 1
             continue
-        text = _known(_value(raw, "text"))
+        text = _string(_value(raw, "text")) if full_archive else _known(_value(raw, "text"))
         if len(text) > MAX_TEXT_LENGTH:
             raise ImportErrorDetail(f"第 {index} 条正文超过 {MAX_TEXT_LENGTH} 字符；请拆分过长正文。")
         sources = _normalize_sources(raw)
         if any(len(s["text"]) > MAX_TEXT_LENGTH for s in sources):
             raise ImportErrorDetail(f"第 {index} 条来源正文过长。")
         text_size += len(text.encode("utf-8")) + sum(len(s["text"].encode("utf-8")) for s in sources)
-        if text_size > MAX_TOTAL_TEXT:
-            raise ImportErrorDetail("帖子和来源正文总量超过 5 MB，请分批整理。")
+        if text_size > text_limit:
+            raise ImportErrorDetail(f"帖子和来源正文总量超过 {text_limit // (1024 * 1024)} MB；未进行部分分析。")
         post_id = _string(_value(raw, "id")) or f"P{index:04d}"
         url = _known(_value(raw, "url"))
         if not url and post_id.isdigit() and len(post_id) >= 8:
             url = f"https://x.com/i/status/{post_id}"
         identity = url or post_id
         if identity in seen and seen[identity] == text:
-            warnings.append(f"第 {index} 条与已有记录标识及正文相同，保留首次记录并忽略重复导入；如含不同附件或来源，请先合并补充材料。")
+            duplicate_imports += 1
+            if not full_archive:
+                warnings.append(f"第 {index} 条与已有记录标识及正文相同，保留首次记录并忽略重复导入；如含不同附件或来源，请先合并补充材料。")
             continue
-        if identity in seen or any(p["id"] == post_id for p in posts):
-            warnings.append(f"第 {index} 条标识重复但正文不同，已保留并追加编号，请核对原始材料。")
+        if identity in seen or post_id in seen_ids:
+            conflicting_ids += 1
+            if not full_archive:
+                warnings.append(f"第 {index} 条标识重复但正文不同，已保留并追加编号，请核对原始材料。")
             post_id = f"{post_id}__{index}"
         seen[identity] = text
+        seen_ids.add(post_id)
         media = _normalize_media(_value(raw, "media", []))
         entities = raw.get("extended_entities", raw.get("entities", {}))
         if not media and isinstance(entities, dict):
@@ -227,6 +237,10 @@ def normalize_project(value, warnings=None):
                       "quoted_url": _known(raw.get("quoted_url", raw.get("quoted_status_permalink", "")))})
     if invalid:
         warnings.append(f"有 {invalid} 条记录不是有效帖子对象，未导入；请核对损坏或错误的记录。")
+    if full_archive and duplicate_imports:
+        warnings.append(f"{duplicate_imports} 条记录与其他记录 ID 及正文相同，作为分片重复记录合并；保留首次记录。")
+    if full_archive and conflicting_ids:
+        warnings.append(f"{conflicting_ids} 条记录 ID 相同但正文不同，已全部保留并追加编号；请核对归档。")
     if records and not posts:
         raise ImportErrorDetail("没有可导入的有效帖子；材料中的记录可能损坏或格式不符。")
     scope = value.get("scope", {})
