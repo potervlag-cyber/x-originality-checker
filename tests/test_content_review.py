@@ -69,6 +69,28 @@ class ContentReviewTests(unittest.TestCase):
         self.assertEqual(1800, payload["max_tokens"])
         self.assertEqual(0, payload["temperature"])
 
+    def test_only_official_deepseek_flash_disables_default_thinking(self):
+        for base_url, model, disabled in (("https://api.deepseek.com", "deepseek-flash", True),
+                ("https://api.deepseek.com/v1", "deepseek-flash", True),
+                ("https://model.example/v1", "deepseek-flash", False),
+                ("https://api.deepseek.com", "deepseek-v4-pro", False),
+                ("https://api.deepseek.com.example/v1", "deepseek-flash", False)):
+            with self.subTest(base_url=base_url, model=model):
+                transport = ModelTransport()
+                reviewer = ContentReviewer("SYNTHETIC_MODEL_KEY", base_url, model, transport=transport)
+                review = reviewer.review(self.post(), self.sources())
+                self.assertEqual("completed", review["status"])
+                self.assertEqual(1, len(transport.calls))
+                payload = json.loads(transport.calls[0]["body"])
+                self.assertEqual({"type": "disabled"} if disabled else None, payload.get("thinking"))
+                self.assertEqual(disabled, "thinking" in payload)
+                self.assertNotIn("reasoning_effort", payload)
+                self.assertEqual(base_url + "/chat/completions", transport.calls[0]["url"])
+                self.assertEqual((1800, {"type": "json_object"}, 0),
+                    (payload["max_tokens"], payload["response_format"], payload["temperature"]))
+                self.assertIn("written in Simplified Chinese", payload["messages"][0]["content"])
+                self.assertIn("in their original language", payload["messages"][0]["content"])
+
     def test_no_fetched_source_never_means_original_score_100(self):
         transport = ModelTransport(rows=model_rows(original=100))
         result = self.reviewer(transport).review(self.post(), [])
