@@ -46,6 +46,31 @@ class StaticTransport:
         return HttpResult(self.url, 200, "text/html; charset=utf-8", f'<html><title>Fixture source</title><meta property="article:published_time" content="2026-01-01T00:00:00Z"><article>{self.content}</article></html>'.encode())
 
 
+class QueryProvider(StaticProvider):
+    """Distinct ranked results (or failure) for each offline fixture query."""
+
+    def __init__(self, groups):
+        super().__init__()
+        self.groups = groups
+
+    def search(self, query):
+        self.queries.append(query)
+        group = self.groups[len(self.queries) - 1]
+        if isinstance(group, WebCheckError):
+            raise group
+        return group
+
+
+class CandidateTransport:
+    def __init__(self, texts):
+        self.texts = texts
+        self.calls = []
+
+    def request(self, url):
+        self.calls.append(url)
+        return HttpResult(url, 200, "text/html", f'<article>{self.texts.get(url, ORIGINAL)}</article>'.encode())
+
+
 class PublicTransportTests(unittest.TestCase):
     def test_rejects_credentials_non_http_and_nonstandard_ports(self):
         for url in ("file:///secret", "https://user:key@example.com/", "http://example.com:8080/", "https://example.com:80/", "https://example.com\\@127.0.0.1/", "https://exa%6dple.com/"):
@@ -152,6 +177,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual([], result["posts"][0]["matches"])
         self.assertEqual("same_post", result["posts"][0]["same_post"][0]["reason"])
         self.assertEqual([], transport.calls)
+        self.assertEqual([], result["posts"][0]["source_checks"])
         self.assertFalse(same_post("https://attacker.example/me/status/12345", self.post()))
 
     def test_redirect_to_own_x_post_excluded(self):
@@ -159,6 +185,72 @@ class ComparisonTests(unittest.TestCase):
         result = WebChecker(provider, StaticTransport(url="https://x.com/any/status/12345")).check([self.post()])
         self.assertEqual([], result["posts"][0]["matches"])
         self.assertEqual(1, len(result["posts"][0]["same_post"]))
+        self.assertEqual("same_post", result["posts"][0]["source_checks"][0]["page_status"])
+        self.assertIsNone(result["posts"][0]["source_checks"][0]["score"])
+
+    def test_second_query_unique_match_is_fetched_within_five_source_budget(self):
+        first = [SearchCandidate(f"https://source.example/first-{i}", "Unrelated", "") for i in range(5)]
+        expected = "https://source.example/second-match"
+        provider = QueryProvider([first, [SearchCandidate(expected, "Expected source", "")]])
+        transport = CandidateTransport({expected: ENGLISH})
+        result = WebChecker(provider, transport).check([self.post(ENGLISH)])["posts"][0]
+        self.assertEqual(2, len(provider.queries))
+        self.assertEqual(expected, transport.calls[1])
+        self.assertEqual(5, len(transport.calls))
+        self.assertEqual(6, result["candidates_found"])
+        self.assertEqual(5, result["sources_checked"])
+        self.assertEqual(5, len(result["source_checks"]))
+        self.assertEqual(expected, result["matches"][0]["url"])
+        self.assertEqual(1, result["matches"][0]["score"])
+        self.assertEqual("partial", result["status"])
+
+    def test_rank_interleaving_deduplicates_urls_and_preserves_match_total(self):
+        urls = [f"https://source.example/{name}" for name in "abcd"]
+        candidates = {url: SearchCandidate(url, "Fixture", "") for url in urls}
+        provider = QueryProvider([[candidates[urls[0]], candidates[urls[1]], candidates[urls[2]]],
+                                  [candidates[urls[0]], candidates[urls[3]], candidates[urls[1]]]])
+        transport = CandidateTransport({url: ENGLISH for url in urls})
+        result = WebChecker(provider, transport).check([self.post(ENGLISH)])["posts"][0]
+        self.assertEqual([urls[0], urls[1], urls[3], urls[2]], transport.calls)
+        self.assertEqual(4, result["candidates_found"])
+        self.assertEqual(4, len(result["source_checks"]))
+        self.assertEqual(4, result["matches_total"])
+        self.assertEqual(3, len(result["matches"]))
+
+    def test_second_query_can_succeed_after_first_query_failure(self):
+        expected = "https://source.example/second-match"
+        provider = QueryProvider([WebCheckError("provider_request_failed"),
+                                  [SearchCandidate(expected, "Expected source", "")]])
+        transport = CandidateTransport({expected: ENGLISH})
+        result = WebChecker(provider, transport).check([self.post(ENGLISH)])["posts"][0]
+        self.assertEqual([expected], transport.calls)
+        self.assertEqual(2, result["query_count"])
+        self.assertEqual(1, result["successful_queries"])
+        self.assertEqual(1, result["matches"][0]["score"])
+        self.assertEqual("partial", result["status"])
+        self.assertIn({"code": "provider_request_failed"}, result["issues"])
+
+    def test_nonmatching_source_diagnostics_are_bounded_and_do_not_return_text_or_queries(self):
+        first = [SearchCandidate(f"https://source.example/first-{i}", "title" * 200, "") for i in range(5)]
+        second = [SearchCandidate(f"https://source.example/second-{i}", "second", "") for i in range(5)]
+        provider = QueryProvider([first, second])
+        transport = CandidateTransport({})
+        result = WebChecker(provider, transport).check([self.post(ENGLISH)])["posts"][0]
+        self.assertEqual(10, result["candidates_found"])
+        self.assertEqual(5, len(transport.calls))
+        self.assertEqual(5, len(result["source_checks"]))
+        allowed = {"url", "title", "page_status", "source_kind", "source_text_truncated", "score", "matched_chars"}
+        for check in result["source_checks"]:
+            self.assertEqual(allowed, set(check))
+            self.assertLessEqual(len(check["title"]), 500)
+            self.assertEqual("fetched", check["page_status"])
+            self.assertEqual("page_body", check["source_kind"])
+            self.assertIsNone(check["score"])
+            self.assertEqual(0, check["matched_chars"])
+        self.assertNotIn(ENGLISH, json.dumps(result["source_checks"]))
+        self.assertNotIn(ORIGINAL, json.dumps(result["source_checks"], ensure_ascii=False))
+        self.assertEqual([], result["matches"])
+        self.assertEqual("partial", result["status"])
 
     def test_search_failure_is_unknown_and_not_zero_or_original(self):
         result = WebChecker(StaticProvider(error="provider_request_failed"), StaticTransport()).check([self.post()])
@@ -184,12 +276,33 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(0, snippet["sources_checked"])
         self.assertEqual("page_metadata", page["matches"][0]["published_at_basis"])
         self.assertEqual("search_result", snippet["matches"][0]["published_at_basis"])
+        self.assertEqual("fetched", page["source_checks"][0]["page_status"])
+        self.assertEqual("page_body", page["source_checks"][0]["source_kind"])
+        self.assertEqual("source_http_failed", snippet["source_checks"][0]["page_status"])
+        self.assertEqual("search_snippet", snippet["source_checks"][0]["source_kind"])
 
     def test_blocked_links_never_return_snippet_evidence(self):
-        provider = StaticProvider([SearchCandidate("https://internal.example/article", "Source", ORIGINAL)])
-        result = WebChecker(provider, StaticTransport(error="source_blocked")).check([self.post()])["posts"][0]
-        self.assertEqual([], result["matches"])
-        self.assertEqual("partial", result["status"])
+        for failure in ("source_blocked", "source_dns_failed"):
+            with self.subTest(failure=failure):
+                provider = StaticProvider([SearchCandidate("https://internal.example/article", "Source", ORIGINAL)])
+                result = WebChecker(provider, StaticTransport(error=failure)).check([self.post()])["posts"][0]
+                self.assertEqual([], result["matches"])
+                self.assertEqual("partial", result["status"])
+                check = result["source_checks"][0]
+                self.assertEqual(failure, check["page_status"])
+                self.assertNotIn("url", check)
+                self.assertNotIn("title", check)
+                self.assertNotIn("internal.example", json.dumps(result))
+                self.assertIsNone(check["score"])
+
+    def test_syntax_blocked_candidate_is_not_in_diagnostics_or_requested(self):
+        provider = StaticProvider([SearchCandidate("https://user:fixture-key@source.example/article", "Source", ORIGINAL)])
+        transport = StaticTransport()
+        result = WebChecker(provider, transport).check([self.post()])["posts"][0]
+        self.assertEqual([], result["source_checks"])
+        self.assertEqual([], transport.calls)
+        self.assertIn({"code": "source_blocked"}, result["issues"])
+        self.assertNotIn("fixture-key", json.dumps(result))
 
     def test_empty_or_javascript_only_page_is_not_compared_body(self):
         provider = StaticProvider([SearchCandidate("https://source.example/article", "Source", ORIGINAL)])
@@ -315,6 +428,9 @@ class RealLocalHTTPTests(unittest.TestCase):
                 self.assertEqual("page_body", match["source_kind"])
                 self.assertEqual("earlier", match["temporal_relation"])
                 self.assertEqual("unknown", result["coverage"]["web_coverage"])
+                self.assertEqual(1, len(result["posts"][0]["source_checks"]))
+                self.assertEqual("https://source.example/article", result["posts"][0]["source_checks"][0]["url"])
+                self.assertEqual("fetched", result["posts"][0]["source_checks"][0]["page_status"])
                 self.assertNotIn("not-a-real-key", json.dumps(result))
                 self.assertNotIn("text", result["posts"][0])
         self.assertTrue(any(call[0] == "tavily" for call in self.fixture.calls))

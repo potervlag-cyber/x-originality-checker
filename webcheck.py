@@ -512,16 +512,18 @@ class WebChecker:
     def _post(self, post):
         text = post["text"][:MAX_CHECKED_TEXT]
         result = {"id": post["id"], "status": "skipped", "query_count": 0, "successful_queries": 0,
-                  "candidates_found": 0, "sources_checked": 0, "matches": [], "same_post": [], "issues": [],
+                  "candidates_found": 0, "sources_checked": 0, "source_checks": [], "matches": [], "same_post": [], "issues": [],
                   "checked_chars": len(text), "original_chars": len(post["text"]), "text_truncated": len(text) != len(post["text"]), "max_similarity": None}
         if len(clean(text)) < MIN_TEXT:
             result["issues"].append({"code": "text_too_short"})
             result["checked_chars"] = 0
             return result
         candidates = {}
+        candidate_groups = []
         queries = search_queries(text)
         for query in queries:
             result["query_count"] += 1
+            group = []
             try:
                 found = self.provider.search(query)
                 result["successful_queries"] += 1
@@ -535,22 +537,41 @@ class WebChecker:
                     if same_post(url, post):
                         if not any(item["url"] == url for item in result["same_post"]):
                             result["same_post"].append({"url": url, "title": candidate.title, "reason": "same_post"})
-                    elif url not in candidates:
-                        candidates[url] = candidate
+                    else:
+                        candidates.setdefault(url, candidate)
+                        if url not in group:
+                            group.append(url)
             except WebCheckError as exc:
                 result["issues"].append({"code": exc.code})
+            candidate_groups.append(group)
         result["candidates_found"] = len(candidates)
         if not result["successful_queries"]:
             result["status"] = "failed"
             result["checked_chars"] = 0
             return result
-        for candidate in list(candidates.values())[:MAX_CANDIDATES]:
+        # Take each query's first result, then each query's second result, etc.
+        # Deduplication keeps the five-source budget while allowing both queries
+        # to contribute even when the first query returned five distinct URLs.
+        selected = []
+        for rank in range(max(map(len, candidate_groups), default=0)):
+            for group in candidate_groups:
+                if rank < len(group) and group[rank] not in selected:
+                    selected.append(group[rank])
+                    if len(selected) == MAX_CANDIDATES:
+                        break
+            if len(selected) == MAX_CANDIDATES:
+                break
+        for url in selected:
+            candidate = candidates[url]
             page = None
             failure = None
             try:
                 response = self.transport.request(candidate.url)
                 if same_post(response.url, post):
                     result["same_post"].append({"url": response.url, "title": candidate.title, "reason": "same_post"})
+                    result["source_checks"].append({"url": response.url, "title": candidate.title[:500],
+                        "page_status": "same_post", "source_kind": None, "source_text_truncated": None,
+                        "score": None, "matched_chars": 0})
                     continue
                 page = page_text(response)
                 if len(clean(page["text"])) < MIN_TEXT:
@@ -566,10 +587,18 @@ class WebChecker:
                 result["issues"].append({"code": failure})
                 # Blocked/private links must not become clickable snippet evidence.
                 if failure in {"source_blocked", "source_dns_failed"}:
+                    result["source_checks"].append({"page_status": failure, "source_kind": None,
+                        "source_text_truncated": None, "score": None, "matched_chars": 0})
                     continue
                 snippet = re.sub(r"<[^>]+>", "", candidate.snippet)
                 matching = compare_text(text, snippet)
                 kind = "search_snippet"
+            result["source_checks"].append({"url": response.url if page else candidate.url,
+                "title": (page["title"] if page and page["title"] else candidate.title)[:500],
+                "page_status": "fetched" if page else failure, "source_kind": kind,
+                "source_text_truncated": page["text_truncated"] if page else None,
+                "score": matching["score"] if matching else None,
+                "matched_chars": matching["matched_chars"] if matching else 0})
             if matching:
                 publication = page["published_at"] if page and page["published_at"] else candidate.published_at
                 result["matches"].append({**matching, "url": response.url if page else candidate.url,
