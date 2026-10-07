@@ -17,7 +17,7 @@ from engine import VERSION, _clean, analyze
 from importers import MAX_FILE_BYTES, import_data, normalize_project
 from reports import html_report, markdown_report
 from archive_adapter import prepare_archive, finish_archive
-from policy_checks import assess_policy
+from policy_checks import assess_policy, combined_evidence
 
 MAX_REQUEST_BYTES = 45 * 1024 * 1024
 _prepared_archive = None
@@ -71,27 +71,39 @@ def _web_coverage(state):
     skipped = sum(p["status"] == "skipped" for p in posts)
     matched = sum(bool(p["matches"]) for p in posts)
     total = len(state["eligible"])
+    selected_total = len(state["selected"])
+    complete = not any(p["status"] in {"partial", "failed", "skipped"} or p["text_truncated"] or p["checked_chars"] < p["original_chars"] for p in posts)
     return {"requested": len(posts), "searched": searched,
             "compared": sum(p["sources_checked"] > 0 for p in posts),
             "failed": failed, "skipped": skipped, "matched": matched,
             "partial": sum(p["status"] == "partial" for p in posts),
-            "remaining": max(total - len(posts), 0), "total_eligible": total,
+            "remaining": max(selected_total - len(posts), 0), "total_eligible": total,
+            "selected_total": selected_total, "unselected_eligible": total - selected_total,
+            "mode": state["selection_mode"], "sample_method": state["sample_method"],
+            "selection_configured": state["selection_locked"],
+            "selection_complete": len(posts) == selected_total,
+            "selection_search_complete": bool(posts) and len(posts) == selected_total and complete,
+            "all_eligible_requested": len(posts) == total,
+            "execution_unknown_posts": sum(p.get("execution_status") == "unknown" for p in posts),
+            "unknown_execution_chars": sum(p["original_chars"] for p in posts if p.get("execution_status") == "unknown"),
             "matched_percent": round(matched / searched * 100, 1) if searched else None,
             "text_truncated_posts": sum(p["text_truncated"] for p in posts),
             "checked_chars": sum(p["checked_chars"] for p in posts),
             "original_chars": sum(p["original_chars"] for p in posts),
-            "search_complete": bool(posts) and len(posts) == total and not any(p["status"] in {"partial", "failed", "skipped"} or p["text_truncated"] or p["checked_chars"] < p["original_chars"] for p in posts),
+            "search_complete": bool(posts) and len(posts) == total and complete,
             "web_coverage": "unknown"}
 
 
 def _web_check(state):
     coverage = _web_coverage(state)
     return {"schema_version": 1,
-            "status": "not_started" if not state["web_posts"] else "partial" if not coverage["search_complete"] else "completed",
+            "status": "not_started" if not state["web_posts"] else "partial" if not coverage["selection_search_complete"] else "completed",
             "provider": state.get("provider", ""), "checked_at": state.get("checked_at", ""),
             "coverage": coverage, "posts": list(state["web_posts"].values()),
             "limitations": ["公开搜索收录和网页访问有缺口，实际全网覆盖未知；未发现匹配不能证明原创。",
                             "文字重合不能确认作者归属、授权、自转载或引用是否恰当，需人工复核。",
+                            "抽样按可检索帖子的归档顺序等距选择，不按风险排序；样本结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "sample10" else "全量联网指归档中可检索的完整非转帖正文；短帖、缺失正文、媒体和归档外内容仍未查。",
+                            "批次发出后取消、超时或响应无效时，上游是否执行及费用未知；返回的零成功次数只表示未取得证据，不表示没有检索消耗。",
                             "联网检查不重算离线参考概率，也不调用 X 官方审核或检查媒体来源。"]}
 
 
@@ -103,19 +115,38 @@ def _current_archive():
 
 def _web_plan(data):
     state = _current_archive()
-    offset = _integer(data.get("offset", 0), "检查起点", maximum=len(state["eligible"]))
+    mode = data.get("mode", state["selection_mode"])
+    if mode not in {"all", "sample10"}:
+        raise ValueError("联网范围应为全部可检索帖子或分散抽取 10 条。")
+    if mode != state["selection_mode"] and state["selection_locked"]:
+        raise ValueError("当前归档的联网范围已固定；请重新导入归档再更换范围。")
+    selected = state["selected"]
+    if mode != state["selection_mode"]:
+        count = min(10, len(state["eligible"]))
+        indices = [(index * (len(state["eligible"]) - 1)) // (count - 1) for index in range(count)] if count > 1 else list(range(count))
+        selected = [state["eligible"][index] for index in indices] if mode == "sample10" else state["eligible"]
+    offset = _integer(data.get("offset", 0), "检查起点", maximum=len(selected))
     limit = _integer(data.get("limit", 10), "每批帖子数", 1, 10)
     maximum = _integer(data.get("max_chars", 5000), "每条检索文字上限", 24, 5000)
+    state.update(selected=selected, selection_mode=mode, selection_locked=True,
+                 sample_method="archive_order_evenly_spaced" if mode == "sample10" else "all_eligible")
     posts = []
-    for post in state["eligible"][offset:offset + limit]:
+    cursor = offset
+    while cursor < len(selected) and len(posts) < limit:
+        post = selected[cursor]
+        cursor += 1
+        if post["id"] in state["web_posts"]:
+            continue
         text = post["text"][:maximum]
         plan = {"id": post["id"], "text": text, "url": post["url"], "created_at": post["created_at"],
                 "original_chars": len(post["text"]), "text_truncated": len(text) < len(post["text"])}
         state["planned"][post["id"]] = {"original_chars": plan["original_chars"], "text_truncated": plan["text_truncated"], "checked_chars": len(text)}
         posts.append(plan)
-    next_offset = offset + len(posts)
+    next_offset = cursor
     return {"session_id": state["session_id"], "total_eligible": len(state["eligible"]),
-            "offset": offset, "next_offset": next_offset, "posts": posts, "done": next_offset >= len(state["eligible"])}
+            "selected_total": len(state["selected"]), "mode": state["selection_mode"], "sample_method": state["sample_method"],
+            "offset": offset, "next_offset": next_offset, "remaining": len(state["selected"]) - next_offset,
+            "posts": posts, "done": next_offset >= len(state["selected"])}
 
 
 def _validated_report(report, state):
@@ -195,24 +226,17 @@ def _validated_report(report, state):
             "issues": [{"code": _text(issue.get("code"), "检查提示代码", 100)} for issue in issues],
             "original_chars": state["planned"][post_id]["original_chars"], "checked_chars": checked_chars,
             "text_truncated": text_truncated,
-            "max_similarity": maximum_similarity})
+            "max_similarity": maximum_similarity, "execution_status": "reported"})
     return posts, provider, checked_at
 
 
-def _web_apply(data):
-    state = _current_archive()
-    if data.get("session_id") != state["session_id"]:
-        raise ValueError("这份联网报告不属于当前归档，请重新开始检查。")
-    posts, provider, checked_at = _validated_report(data.get("report"), state)
-    # Validate the complete batch before updating retained state. Bad evidence never
-    # replaces an earlier result or prevents downloading the offline analysis.
-    next_state = {**state, "web_posts": {**state["web_posts"], **{p["id"]: p for p in posts}},
-                  "provider": provider or state.get("provider", ""), "checked_at": checked_at or state.get("checked_at", "")}
+def _composed_result(state, next_state):
     web_check = _web_check(next_state)
     result = copy.deepcopy(state["base_result"])
     result["web_check"] = web_check
     result["coverage"]["web_check"] = web_check["coverage"]
     result["policy_checks"] = assess_policy(state["posts"], state["assessed_posts"], web_check)
+    result["summary"]["combined_evidence"] = combined_evidence(result["summary"], result["policy_checks"], web_check, state["posts"])
     result["limitations"] = [item for item in result.get("limitations", []) if "未做全网查重" not in item]
     result["limitations"].extend(web_check["limitations"])
     for reason in result.get("reasons", []):
@@ -227,6 +251,48 @@ def _web_apply(data):
                 reason["message"] = "归档内比较未发现明显重复；本条是否联网及来源证据见联网报告，未发现匹配不能证明原创。"
     state.update(web_posts=next_state["web_posts"], provider=next_state["provider"], checked_at=next_state["checked_at"])
     return result
+
+
+def _web_apply(data):
+    state = _current_archive()
+    if data.get("session_id") != state["session_id"]:
+        raise ValueError("这份联网报告不属于当前归档，请重新开始检查。")
+    posts, provider, checked_at = _validated_report(data.get("report"), state)
+    # Validate and compose the complete batch before updating retained state.
+    next_state = {**state, "web_posts": {**state["web_posts"], **{p["id"]: p for p in posts}},
+                  "provider": provider or state.get("provider", ""), "checked_at": checked_at or state.get("checked_at", "")}
+    return _composed_result(state, next_state)
+
+
+def _web_abandon(data):
+    state = _current_archive()
+    if data.get("session_id") != state["session_id"]:
+        raise ValueError("这份联网批次不属于当前归档。")
+    ids = data.get("ids")
+    reason = data.get("reason")
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 10 or any(not isinstance(pid, str) for pid in ids)
+            or len(set(ids)) != len(ids) or any(pid not in state["planned"] for pid in ids)
+            or reason not in {"response_unknown", "cancelled"}):
+        raise ValueError("无法确认当前已发出的联网批次。")
+    updates = {}
+    for pid in ids:
+        if pid in state["web_posts"]:
+            continue  # Never overwrite evidence that arrived before cancellation.
+        plan = state["planned"][pid]
+        updates[pid] = {"id": pid, "status": "failed", "execution_status": "unknown",
+            "query_count": 0, "successful_queries": 0, "candidates_found": 0, "sources_checked": 0,
+            "matches": [], "matches_total": 0, "same_post": [],
+            "issues": [{"code": "batch_response_unknown"}, {"code": reason}],
+            "original_chars": plan["original_chars"], "checked_chars": 0,
+            "text_truncated": plan["text_truncated"], "max_similarity": None}
+    next_state = {**state, "web_posts": {**state["web_posts"], **updates},
+                  "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")}
+    return _composed_result(state, next_state)
+
+
+def _web_result():
+    state = _current_archive()
+    return _composed_result(state, {**state, "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")})
 
 
 def prepare_archive_json(payload_json):
@@ -262,7 +328,9 @@ def finish_archive_json(media_json):
             "base_result": result,
             "eligible": [p for p in posts if p["type"] != "repost" and p["text_complete"] is True and len(_clean(p["text"])) >= 24],
             "planned": {}, "web_posts": {}}
+        _retained_archive.update(selected=_retained_archive["eligible"], selection_mode="all", sample_method="all_eligible", selection_locked=False)
         result["web_check"] = _web_check(_retained_archive)
+        result["summary"]["combined_evidence"] = combined_evidence(result["summary"], result["policy_checks"], result["web_check"], posts)
         response = {"ok": True, "result": result}
     except (ValueError, TypeError, KeyError, UnicodeError, OverflowError) as exc:
         _retained_archive = None
@@ -298,6 +366,10 @@ def _dispatch(path, data):
         return _web_plan(data)
     if path == "/api/webcheck/apply":
         return _web_apply(data)
+    if path == "/api/webcheck/abandon":
+        return _web_abandon(data)
+    if path == "/api/webcheck/result":
+        return _web_result()
     if path == "/api/import":
         encoded = data.get("content_base64", "")
         if not isinstance(encoded, str) or len(encoded) > MAX_FILE_BYTES * 4 // 3 + 8:

@@ -60,6 +60,30 @@ test('service failure and mismatched evidence never become a successful no-match
   await assert.rejects(wrong.check([{id:'1',text:'sample'}]), /不一致/);
 });
 
+test('explicit batch rejection is distinguishable from a lost or malformed search response', async () => {
+  for (const status of [401, 403, 429]) {
+    let calls = 0;
+    const client = OriginalityWebCheck.create('https://service.example', {fetch: async () => { calls++; return response(status, {}); }});
+    await assert.rejects(client.check([{id: '1', text: 'public sample'}]), error => error.httpStatus === status && error.searchNotExecuted === true);
+    assert.equal(calls, 1);
+  }
+  for (const failure of [() => { throw new TypeError('lost response'); }, () => response(500, {}), () => response(200, {schema_version: 1, coverage: {}, posts: [{id: 'other'}]})]) {
+    let calls = 0;
+    const client = OriginalityWebCheck.create('https://service.example', {fetch: async () => { calls++; return failure(); }});
+    await assert.rejects(client.check([{id: '1', text: 'public sample'}]), error => error.searchNotExecuted !== true);
+    assert.equal(calls, 1);
+  }
+});
+
+test('cancellation before a batch is dispatched does not mark it as possibly executed', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const client = OriginalityWebCheck.create('https://service.example', {fetch: async () => { calls++; return response(200, {}); }});
+  await assert.rejects(client.check([{id: '1', text: 'public sample'}], controller.signal), error => error.searchNotExecuted === true);
+  assert.equal(calls, 0);
+});
+
 test('cancelled web request uses AbortSignal and preserves an explicit cancellation result', async () => {
   const controller = new AbortController();
   const client = OriginalityWebCheck.create('https://service.example', {fetch:async (_url, options) => {

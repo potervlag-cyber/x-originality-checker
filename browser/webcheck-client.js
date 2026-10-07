@@ -55,10 +55,14 @@
     }
 
     function serviceError(status, data) {
-      if (data?.code === 'provider_not_configured') return new Error('查重服务尚未配置搜索 API，暂时不能联网检索。');
       const messages = {401: '查重服务需要有效的访问码。', 403: '查重服务未允许此网页连接。',
         429: '搜索额度或并发已用完，请稍后继续。', 503: '查重服务暂时不可用，本地结果已保留。'};
-      return new Error(messages[status] || `查重服务请求失败（${status}），本地结果已保留。`);
+      const error = new Error(data?.code === 'provider_not_configured' ? '查重服务尚未配置搜索 API，暂时不能联网检索。'
+        : messages[status] || `查重服务请求失败（${status}），本地结果已保留。`);
+      error.httpStatus = status;
+      // These service responses reject a batch before provider execution.
+      error.searchNotExecuted = [401, 403, 429].includes(status) || data?.code === 'provider_not_configured';
+      return error;
     }
 
     async function send(path, body, signal) {
@@ -70,6 +74,7 @@
       // One deadline covers every GET attempt and retry delay. POSTs are never
       // replayed: a lost response can still represent a paid search execution.
       const timer = setTimer(() => controller.abort(), statusRequest ? STATUS_TIMEOUT_MS : POST_TIMEOUT_MS);
+      let requestStarted = false;
       try {
         const headers = {Accept: 'application/json'};
         if (body) headers['Content-Type'] = 'application/json';
@@ -81,6 +86,7 @@
           attempt += 1;
           let response, text;
           try {
+            requestStarted = true;
             response = await abortable(fetcher(root + path, {method: body ? 'POST' : 'GET', headers,
               credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
               ...(body ? {body: JSON.stringify(body)} : {})}), controller.signal);
@@ -112,8 +118,10 @@
           return data;
         }
       } catch (error) {
-        if (controller.signal.aborted) throw new Error(signal?.aborted ? '联网查重已取消，已完成的结果保留。' : statusRequest ? '等待查重服务唤醒超时（最多 2 分钟），本地结果已保留；请稍后再连接。' : '查重服务超时，本地结果已保留。');
-        throw error instanceof TypeError ? new Error('无法连接查重服务，请检查服务地址及网页访问许可。') : error;
+        const reported = controller.signal.aborted ? new Error(signal?.aborted ? '联网查重已取消，已完成的结果保留。' : statusRequest ? '等待查重服务唤醒超时（最多 2 分钟），本地结果已保留；请稍后再连接。' : '查重服务超时，本地结果已保留。')
+          : error instanceof TypeError ? new Error('无法连接查重服务，请检查服务地址及网页访问许可。') : error;
+        if (!statusRequest && (!requestStarted || error?.searchNotExecuted)) reported.searchNotExecuted = true;
+        throw reported;
       } finally {
         clearTimer(timer);
         signal?.removeEventListener('abort', onAbort);

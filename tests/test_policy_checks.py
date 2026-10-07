@@ -2,7 +2,7 @@ import unittest
 
 from engine import analyze
 from importers import normalize_project
-from policy_checks import assess_policy
+from policy_checks import assess_policy, combined_evidence
 
 
 BODY = "我在同一台设备上测试三种资料整理方法，记录每次出现的失败、修正过程和结果，并且把适用条件与不能确认的结论分别写清楚。"
@@ -205,6 +205,70 @@ class PolicyChecksTests(unittest.TestCase):
         self.assertEqual(0, item["signal_count"])
         self.assertEqual(12, item["unknown_count"])
         self.assertIsNone(item["signal_percent"])
+
+    def test_sample_evidence_does_not_change_population_denominator_or_invent_probability(self):
+        posts = normalized([{"id": str(index), "text": BODY + str(index)} for index in range(20)])
+        web = {"coverage": {"mode": "sample10", "selected_total": 10, "total_eligible": 20,
+                "requested": 1, "searched": 1, "remaining": 9, "unselected_eligible": 10,
+                "sample_method": "archive_order_evenly_spaced", "selection_search_complete": False},
+               "posts": [{"id": "0", "status": "matched", "sources_checked": 1,
+                "matches": [{"url": "https://example.test/source", "score": 0.93,
+                             "source_kind": "page_body", "page_status": "fetched", "temporal_relation": "unknown"}]}]}
+        policy = assess_policy(posts, web_check=web)
+        original = row(policy, "original_contribution")
+        self.assertEqual((1, 20, 5.0), (original["signal_count"], original["denominator"], original["signal_percent"]))
+        self.assertEqual("not_estimated", policy["web_evidence_scope"]["projection"])
+        combined = combined_evidence({"total": 20, "counts": {}}, policy, web, posts)
+        self.assertEqual("needs_review", combined["status"])
+        self.assertEqual((1, 0, 19), (combined["body_matched_posts"], combined["snippet_matched_posts"], combined["unknown_own_posts"]))
+        self.assertIsNone(combined["official_probability"])
+        self.assertFalse(combined["probability_recalculated"])
+
+    def test_snippets_later_sources_and_same_post_never_become_strong_copying_conclusion(self):
+        posts = normalized([{"id": "123456789", "text": BODY}])
+        for match in (
+            {"url": "https://example.test/source", "source_kind": "search_snippet", "page_status": "source_http_failed"},
+            {"url": "https://example.test/later", "source_kind": "page_body", "page_status": "fetched", "temporal_relation": "later"},
+            {"url": "https://x.com/another/status/123456789", "source_kind": "page_body", "page_status": "fetched"},
+        ):
+            with self.subTest(match=match):
+                web = {"coverage": {"requested": 1, "selected_total": 1, "total_eligible": 1, "searched": 1, "selection_search_complete": False},
+                       "posts": [{"id": "123456789", "status": "partial", "sources_checked": 0, "matches": [{"score": 0.96, **match}]}]}
+                combined = combined_evidence({"total": 1, "counts": {}}, assess_policy(posts, web_check=web), web, posts)
+                self.assertEqual(0, combined["body_signal_posts"])
+                self.assertEqual("incomplete", combined["status"])
+
+    def test_post_with_body_and_snippet_is_not_counted_as_snippet_only(self):
+        posts = normalized([{"id": "1", "text": BODY}, {"id": "2", "text": BODY + "第二条"}])
+        snippet = {"url": "https://example.test/snippet", "score": 0.94, "source_kind": "search_snippet", "page_status": "source_http_failed"}
+        body = {"url": "https://example.test/body", "score": 0.94, "source_kind": "page_body", "page_status": "fetched"}
+        web = {"coverage": {"requested": 2, "selected_total": 2, "total_eligible": 2, "searched": 2},
+               "posts": [{"id": "1", "status": "partial", "sources_checked": 1, "matches": [body, snippet]},
+                         {"id": "2", "status": "partial", "sources_checked": 0, "matches": [snippet]}]}
+        combined = combined_evidence({"total": 2, "counts": {}}, assess_policy(posts, web_check=web), web, posts)
+        self.assertEqual(1, combined["body_matched_posts"])
+        self.assertEqual(1, combined["snippet_matched_posts"])
+        self.assertIn("1 条仅有摘要", combined["conclusion"])
+
+    def test_local_only_conclusion_leads_with_local_findings_and_does_not_select_web_pool(self):
+        posts = normalized([{"id": "1", "text": BODY}])
+        web = {"coverage": {"requested": 0, "selected_total": 1, "total_eligible": 1,
+                "remaining": 1, "selection_configured": False}, "posts": []}
+        policy = assess_policy(posts)
+        for counts, status in (({"high_risk": 1}, "needs_review"), ({}, "local_completed")):
+            with self.subTest(counts=counts):
+                combined = combined_evidence({"total": 1, "counts": counts}, policy, web, posts)
+                self.assertEqual(status, combined["status"])
+                self.assertIn("本地", combined["title"])
+                self.assertIn("本次未联网", combined["conclusion"])
+                self.assertIn("共有 1 条可联网检索", combined["conclusion"])
+                self.assertNotIn("联网选择", combined["conclusion"])
+                self.assertEqual((0, 0, 1), (combined["selected_total"], combined["remaining"], combined["unselected_eligible"]))
+                self.assertFalse(combined["selection_configured"])
+                self.assertEqual("not_selected", combined["sample_method"])
+        web["coverage"]["total_eligible"] = 0
+        combined = combined_evidence({"total": 1, "counts": {}}, policy, web, posts)
+        self.assertIn("当前没有可联网检索的完整正文", combined["conclusion"])
 
 
 if __name__ == "__main__":

@@ -194,9 +194,9 @@ test('archive facade validates 300 MiB boundary and permits cancellation/retry',
   assert.equal(runtime.ready, true);
 });
 
-test('web plan apply and archive clear stay in the local worker protocol', async () => {
+test('web plan apply abandon result and archive clear stay in the local worker protocol', async () => {
   const {runtime, workers} = await initialized();
-  for (const path of ['/api/webcheck/plan', '/api/webcheck/apply', '/api/archive/clear']) {
+  for (const path of ['/api/webcheck/plan', '/api/webcheck/apply', '/api/webcheck/abandon', '/api/webcheck/result', '/api/archive/clear']) {
     const data = path.endsWith('apply') ? {session_id: 'archive-session', report: {posts: []}} : {};
     const promise = runtime.request(path, data);
     const sent = workers[0].sent.at(-1);

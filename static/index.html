@@ -24,19 +24,37 @@
         <p class="intro-copy">直接选择从 X 下载的归档压缩包。系统自动分析全部发帖，<br class="desktop-break">逐项检查原创要求，并可联网查找相似来源。</p>
       </section>
       <section class="upload-card" aria-labelledby="upload-title">
+        <div class="analysis-options" id="analysis-options">
+          <fieldset class="choice-group"><legend>选择分析方式</legend><div class="choice-grid">
+            <label class="choice-card"><input type="radio" name="analysis-mode" value="local" checked><span><strong>本地分析</strong><small>检查全部归档帖子与原创要求，无需连接查重服务。</small></span></label>
+            <label class="choice-card"><input type="radio" name="analysis-mode" value="network"><span><strong>本地分析 + 联网查重</strong><small>核对公开来源，完成后直接给出包含联网证据的报告。</small></span></label>
+          </div></fieldset>
+          <div id="network-setup" hidden>
+            <fieldset class="choice-group"><legend>联网查询范围</legend><div class="choice-grid">
+              <label class="choice-card"><input type="radio" name="web-scope" value="sample10" checked><span><strong>抽取 10 条</strong><small>按归档顺序分散抽取；不足 10 条时检查全部可检索正文。</small></span></label>
+              <label class="choice-card"><input type="radio" name="web-scope" value="all"><span><strong>全部可检索正文</strong><small>分批自动查询，所需时间与搜索额度随帖子数量增加。</small></span></label>
+            </div></fieldset>
+            <details class="service-settings" open><summary>连接查重服务</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><label>服务访问码（仅本页使用）<input id="web-token" type="password" autocomplete="off"></label><p>服务访问码由提供此工具的人给出，搜索 API 密钥留在服务端。所有使用者共用服务额度。</p></details>
+            <label class="consent-option"><input id="web-consent" type="checkbox"><span>我确认所选范围内的帖子文字可发送给查重服务及搜索提供商。ZIP、媒体、私信和账号资料保留在本机；每条最多查前 5,000 字，未查部分会标明。</span></label>
+            <div class="web-actions"><button class="button secondary" id="web-connect" type="button">检查服务连接</button><button class="button quiet" id="cancel-connection" type="button" hidden>取消连接</button><button class="button primary" id="resume-setup" type="button" hidden>继续查询并更新报告</button></div>
+            <p class="setup-status" id="setup-status" role="status" aria-live="polite">先选择范围、填写连接信息并确认发送许可，再开始分析。</p>
+          </div>
+        </div>
         <div class="drop-zone" id="drop-zone">
           <svg class="upload-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M29 6H13a4 4 0 0 0-4 4v28a4 4 0 0 0 4 4h22a4 4 0 0 0 4-4V16L29 6Z" stroke="currentColor" stroke-width="1.7"/><path d="M29 6v10h10M22 12h4m-4 5h4m-4 5h4m-4 5h4m-4 5h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <h2 id="upload-title">拖入 X 归档 ZIP</h2>
           <p class="upload-description">无需筛选帖子，也无需先解压</p>
           <button class="button primary" type="button" id="choose-file">选择归档 ZIP <span aria-hidden="true">↑</span></button>
           <input type="file" id="file-input" accept=".zip,application/zip,application/x-zip-compressed" hidden>
+          <p class="selected-file-status" id="selected-file-status" role="status" aria-live="polite" hidden></p>
+          <button class="button primary" id="run-analysis" type="button" hidden>开始分析</button>
           <p class="upload-limit">单个 ZIP 最大 300 MB（300 MiB）</p>
         </div>
         <div class="processing" id="processing" hidden>
           <div class="file-row"><span class="file-symbol" aria-hidden="true">ZIP</span><div class="file-info"><strong id="file-name"></strong><span id="file-size"></span></div><button class="button quiet" id="cancel" type="button">取消分析</button></div>
           <div class="progress-track" id="progress-track" role="progressbar" aria-label="归档分析进度"><span></span></div>
           <p class="progress-message" id="progress-message" role="status" aria-live="polite">正在准备分析…</p>
-          <p class="processing-note">大归档需要一些时间，请保持页面打开。材料不会上传到服务器。</p>
+          <p class="processing-note" id="processing-note">大归档需要一些时间，请保持页面打开。ZIP 在本机处理。</p>
         </div>
         <div class="upload-footer"><span><svg viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 2 15 4v4c0 4-6 7-6 7s-6-3-6-7V4l6-2Z" stroke="currentColor" stroke-width="1.3"/><path d="m6.5 8.5 1.8 1.8 3.3-3.7" stroke="currentColor" stroke-width="1.3"/></svg>跳过私信等无关数据</span><span>默认检测归档中全部帖子</span></div>
       </section>
@@ -45,8 +63,9 @@
       <section class="results" id="results" aria-labelledby="result-title" hidden>
         <div class="result-heading"><div><p class="eyebrow">分析完成</p><h2 id="result-title">你的归档分析结果</h2></div><button class="button secondary" id="change-file" type="button">换一个 ZIP</button></div>
         <p class="result-meta" id="result-meta"></p>
+        <section class="combined-conclusion" id="combined-conclusion" aria-labelledby="combined-title"><p class="eyebrow">综合报告</p><h3 id="combined-title">归档检查结果</h3><p id="combined-description"></p><p class="combined-coverage" id="combined-coverage"></p><p class="combined-run-status" id="combined-run-status" role="status" aria-live="polite"></p></section>
         <div class="conclusion-card">
-          <div class="probability-result" aria-labelledby="probability-label"><p class="metric-label" id="probability-label">原创通过概率（工具估计）</p><strong class="probability-value" id="probability-value">—</strong><div class="probability-meta" id="probability-meta" hidden><span id="probability-range"></span><span class="confidence-badge" id="probability-confidence"></span></div><p id="probability-explanation">根据归档内的文本信号与材料完整性给出参考估计。</p></div>
+          <div class="probability-result" aria-labelledby="probability-label"><p class="metric-label" id="probability-label">归档信号参考概率（工具估计）</p><strong class="probability-value" id="probability-value">—</strong><div class="probability-meta" id="probability-meta" hidden><span id="probability-range"></span><span class="confidence-badge" id="probability-confidence"></span></div><p id="probability-explanation">根据归档内的文本信号与材料完整性给出参考估计。</p></div>
           <div class="observed-result"><p class="metric-label">可比较正文未重复占比</p><strong class="observed-value" id="nonduplicate-value">—</strong><p id="nonduplicate-detail"></p></div>
         </div>
         <p class="metric-footnote">概率由本工具的规则估计，尚未用真实审核样本校准；主观参考范围不是统计置信区间。未重复占比是另一项文本观察指标。</p>
@@ -56,10 +75,7 @@
           <h3 id="webcheck-title">全网文字查重 · 公开来源检索</h3>
           <p class="section-description">检索可被搜索服务找到的网页和 X 帖子，核对相似片段及来源。收录与访问权限限制了覆盖；搜索不到不代表原创，来源相似也不等于搬运。</p>
           <p class="web-status" id="web-status" role="status" aria-live="polite">尚未联网查重。</p>
-          <details class="service-settings"><summary>连接查重服务</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><label>服务访问码（如需，仅本页使用）<input id="web-token" type="password" autocomplete="off"></label><p>搜索 API 密钥保存在服务端。这里填写服务访问码，不填写 Tavily 或 Brave 的 API 密钥。</p></details>
-          <div class="web-options"><label>本次范围<select id="web-limit"><option value="10">接下来 10 条可比较正文</option><option value="100">接下来 100 条可比较正文</option><option value="all">全部剩余可比较正文</option></select></label><button class="button secondary" id="web-connect" type="button">检查服务连接</button></div>
-          <label class="consent-option"><input id="web-consent" type="checkbox"><span>我确认本次待检索的归档文字可发送给查重服务及搜索提供商。归档无法确认帖子当前是否公开；ZIP、媒体、私信和账号资料不会发送。每条最多检索前 5,000 字，剩余部分会标记为未查。</span></label>
-          <div class="web-actions"><button class="button primary" id="web-start" type="button">开始联网查重</button><button class="button quiet" id="web-cancel" type="button" hidden>取消联网操作</button></div>
+          <div class="web-actions" id="web-recovery" hidden><button class="button primary" id="web-start" type="button">继续剩余联网查询</button><button class="button secondary" id="edit-connection" type="button">修改连接信息</button></div>
           <div class="web-evidence" id="web-evidence"></div>
         </section>
         <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">这次估计的原因</h3><div class="reason-list" id="reason-list"></div></section>

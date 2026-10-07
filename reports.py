@@ -11,13 +11,14 @@ def markdown_report(project: dict, result: dict) -> str:
 
     summary = result.get("summary", {})
     coverage = result.get("coverage", {})
+    combined = summary.get("combined_evidence")
     lines = [
         "# X 原创风险评估报告",
         "",
         f"- 工具版本：{VERSION}",
         f"- 生成时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}（UTC）",
         f"- 账号：{line(project.get('account')) or '未填写'}",
-        "- 评估方式：本机规则与已提供材料对比，未调用 X 官方审核接口或全网查重。",
+        "- 评估方式：全归档本机规则与有限公开来源证据合并，未调用 X 官方审核接口。" if combined and result.get("web_check", {}).get("coverage", {}).get("requested") else "- 评估方式：本机规则与已提供材料对比，未调用 X 官方审核接口或全网查重。",
         "- 结论边界：风险等级不是官方原创认定、申请通过概率或版权结论。",
         "",
         "## 覆盖范围",
@@ -34,6 +35,9 @@ def markdown_report(project: dict, result: dict) -> str:
     labels = {"high_risk": "高风险", "review": "需复核", "insufficient": "材料不足", "low_signal": "未发现明显文本风险"}
     for status, label in labels.items():
         lines.append(f"- {label}：{summary.get('counts', {}).get(status, 0)}")
+    if combined:
+        lines.extend(["", "## 综合证据结论", "", line(combined.get("title")), "", line(combined.get("conclusion")), "",
+                      "离线参考概率保留原值，联网证据没有校准或重算它；官方通过概率仍未知。"])
     lines.extend(["", "## 逐帖证据", ""])
     for post in result.get("posts", []):
         lines.extend([
@@ -79,6 +83,10 @@ def html_report(project: dict, result: dict) -> str:
     escape = lambda value: html.escape(str(value or ""))
     summary = result.get("summary", {})
     coverage = result.get("coverage", {})
+    combined = summary.get("combined_evidence")
+    combined_html = (f"<section><h2>综合证据结论</h2><p>{escape(combined.get('title'))}</p><p>{escape(combined.get('conclusion'))}</p>"
+                     "<p class='muted'>离线参考概率保留原值，联网证据没有校准或重算它；官方通过概率仍未知。</p></section>") if combined else ""
+    assessment = "全归档本机规则与有限公开来源证据合并，未调用官方审核。" if combined and result.get("web_check", {}).get("coverage", {}).get("requested") else "本机材料风险评估，未调用官方审核或全网查重。"
     cards = []
     for post in result.get("posts", []):
         reasons = "".join(
@@ -96,9 +104,9 @@ def html_report(project: dict, result: dict) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>X 原创风险评估报告</title>
 <style>body{{max-width:960px;margin:40px auto;padding:0 24px;font:15px/1.8 'Microsoft YaHei',sans-serif;color:#203544;background:#f5f8fa}}h1{{font-size:28px}}h2{{font-size:19px}}section{{background:white;padding:22px;margin:18px 0;border:1px solid #dbe5ec;border-radius:12px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#f3f6f8;padding:14px}}.muted{{color:#536b7b}}@media print{{body{{margin:0;background:white}}section{{break-inside:avoid}}}}</style>
 <h1>X 原创风险评估报告</h1><p>账号：{escape(project.get('account')) or '未填写'} · 版本 {VERSION}</p>
-<p class="muted">本机材料风险评估，未调用官方审核或全网查重。结果不是官方原创认定、申请通过概率或版权结论。</p>
+<p class="muted">{assessment}结果不是官方原创认定、申请通过概率或版权结论。</p>
 <section><h2>覆盖范围</h2><pre>{escape(json.dumps(coverage, ensure_ascii=False, indent=2))}</pre>
 <h2>检查概览</h2><p>评估 {escape(summary.get('total', 0))} 篇</p><pre>{escape(json.dumps(summary.get('counts', {}), ensure_ascii=False, indent=2))}</pre></section>
-{''.join(cards)}<section><h2>申请候选</h2><p>材料排序，不是官方评分；不足 10 篇时不凑数。</p><ol>{candidates}</ol>
+{combined_html}{''.join(cards)}<section><h2>申请候选</h2><p>材料排序，不是官方评分；不足 10 篇时不凑数。</p><ol>{candidates}</ol>
 <p>用户已选：{escape('、'.join(project.get('selected_candidates', []))) or '无'}</p></section>
 <section><h2>局限与待确认</h2><ul>{limitations}</ul></section></html>"""

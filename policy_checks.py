@@ -236,7 +236,84 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
     ]
     auxiliary = _item("repeated_engagement", "重复互动请求（辅助线索）", None, own,
         interaction_checked, interaction_signals, interaction_evidence, "本工具辅助检查，不是新增的官方原创条款；出现重复请求不等于互动造假，也不构成自动化或原创违规认定。", auxiliary=True)
-    return {"source": dict(SOURCE), "disclaimer": "不符合程度以工具风险线索强度显示；百分比是线索涉及记录占非普通转帖记录的比例，不是官方违规率、抄袭率或评分。未检查、证据不足和未发现线索不能当作符合要求。",
+    result = {"source": dict(SOURCE), "disclaimer": "不符合程度以工具风险线索强度显示；百分比是线索涉及记录占非普通转帖记录的比例，不是官方违规率、抄袭率或评分。未检查、证据不足和未发现线索不能当作符合要求。",
             "denominator_label": "本次非普通转帖记录；包括回复和引用，不能据此认定属于奖励范围。",
             "requirements": [*requirements, auxiliary],
             "account_eligibility": {"status": "unknown", "degree": "无法判断", "reason": "内容报告不能核验会员、认证粉丝、首页时间线曝光、所在地区、账号状态或其他收益资格。", "official_score": None}}
+    if isinstance(web_check, dict):
+        coverage = web_check.get("coverage", {})
+        result["web_evidence_scope"] = {key: coverage.get(key) for key in
+            ("mode", "sample_method", "selected_total", "total_eligible", "requested", "selection_search_complete")}
+        result["web_evidence_scope"]["projection"] = "not_estimated"
+        if coverage.get("mode") == "sample10":
+            result["requirements"][0]["interpretation"] += " 联网样本按归档顺序分散抽取，未将样本命中比例推广为全归档违规率。"
+    return result
+
+
+def combined_evidence(summary, policy, web_check, posts=None):
+    """Combine evidence without revising the uncalibrated offline probability."""
+    coverage = web_check.get("coverage", {}) if isinstance(web_check, dict) else {}
+    known_posts = {str(post.get("id", "")): post for post in posts or []}
+    body, snippets, body_signals = set(), set(), set()
+    for entry in _web_posts(web_check).values():
+        pid = str(entry.get("id", ""))
+        post = known_posts.get(pid, {"id": pid})
+        for match in entry.get("matches", []):
+            score = _match_score(match)
+            if score is None or score < 0.5 or _same_post(post, match):
+                continue
+            if match.get("source_kind") == "page_body" and match.get("page_status") == "fetched":
+                body.add(pid)
+                if match.get("temporal_relation") != "later":
+                    body_signals.add(pid)
+            else:
+                snippets.add(pid)
+    snippets.difference_update(body)  # Count only posts whose overlap has no fetched-body evidence.
+    original = next((item for item in policy.get("requirements", []) if item.get("id") == "original_contribution"), {})
+    local_review = sum(summary.get("counts", {}).get(status, 0) for status in ("high_risk", "review"))
+    requested = coverage.get("requested", 0)
+    configured = bool(coverage.get("selection_configured", requested > 0))
+    selected = coverage.get("selected_total", coverage.get("total_eligible", 0))
+    total = coverage.get("total_eligible", 0)
+    unknown = original.get("unknown_count", 0)
+    local_only = not configured and not requested
+    if local_only:
+        selected = 0
+        status, title = ("needs_review", "本地分析发现需人工复核的线索") if local_review else ("local_completed", "本地归档检查完成")
+    elif not requested:
+        status, title = "incomplete", "联网范围已选择，尚未取得公开证据"
+    elif body_signals or local_review:
+        status, title = "needs_review", "综合证据存在需人工复核的线索"
+    elif unknown or not coverage.get("selection_search_complete", coverage.get("search_complete", False)):
+        status, title = "incomplete", "综合证据仍有未检查或无法确认的部分"
+    else:
+        status, title = "no_detected_overlap", "已检查材料未发现明显重合线索"
+    mode = coverage.get("mode", "all")
+    scope = f"分散抽取 {selected} 条" if mode == "sample10" else f"全部 {selected} 条可检索正文"
+    if local_only:
+        availability = f"共有 {total} 条可联网检索正文，本次未联网。" if total else "当前没有可联网检索的完整正文，本次未联网。"
+        conclusion = (f"归档本地分析覆盖 {summary.get('total', 0)} 条记录，其中 {local_review} 条需人工复核。"
+                      + availability + f" 原创贡献仍有 {unknown} 条证据不足；归档内相似不能证明抄袭，未发现重复不能证明原创。")
+    else:
+        conclusion = (f"归档本地分析覆盖 {summary.get('total', 0)} 条记录；联网选择{scope}，已回读成功检索 {coverage.get('searched', 0)} 条。"
+                      f"{len(body)} 条取得公开正文重合证据，{len(snippets)} 条仅有摘要重合线索；原创贡献仍有 {unknown} 条证据不足。"
+                      "相似不能证明抄袭、作者归属或授权；未发现匹配不能证明原创。")
+    if mode == "sample10" and not local_only:
+        conclusion += " 样本结果不能推广为未选帖子或全归档的原创程度。"
+    if coverage.get("execution_unknown_posts", 0):
+        conclusion += f" {coverage['execution_unknown_posts']} 条已发出帖子的执行情况未知，不能推断没有消耗查询额度。"
+    return {"status": status, "title": title, "conclusion": conclusion,
+        "offline_total": summary.get("total", 0), "offline_review_posts": local_review,
+        "web_mode": mode, "selected_total": selected, "total_eligible": total,
+        "searched_posts": coverage.get("searched", 0), "body_matched_posts": len(body),
+        "body_signal_posts": len(body_signals), "snippet_matched_posts": len(snippets),
+        "policy_signal_posts": original.get("signal_count", 0), "unknown_own_posts": unknown,
+        "unselected_eligible": total if local_only else coverage.get("unselected_eligible", max(total - selected, 0)),
+        "remaining": 0 if local_only else coverage.get("remaining", selected),
+        "sample_method": "not_selected" if local_only else coverage.get("sample_method", "all_eligible"),
+        "selection_configured": configured,
+        "selection_complete": coverage.get("selection_complete", False),
+        "all_eligible_requested": coverage.get("all_eligible_requested", False),
+        "execution_unknown_posts": coverage.get("execution_unknown_posts", 0),
+        "unknown_execution_chars": coverage.get("unknown_execution_chars", 0),
+        "official_probability": None, "probability_recalculated": False}

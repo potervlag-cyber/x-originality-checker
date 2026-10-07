@@ -16,6 +16,7 @@ sys.path.insert(0, str(APP_ROOT / "browser"))
 import browser_api
 from engine import analyze
 from importers import normalize_project
+from reports import html_report, markdown_report
 
 TEXT = "我在同一台设备上连续测试了三种发布方式，记录每次加载延迟和失败原因。结果显示完整来源说明减少了后续核实时间，以下是测量过程与具体结论。"
 
@@ -179,7 +180,8 @@ class BrowserAdapterTests(unittest.TestCase):
         with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun full archive")):
             matched = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][0]["id"], "matched", [self.match()])})
         self.assertTrue(matched["ok"], matched)
-        self.assertEqual(base["summary"], matched["result"]["summary"])
+        self.assertEqual({key: value for key, value in base["summary"].items() if key != "combined_evidence"},
+                         {key: value for key, value in matched["result"]["summary"].items() if key != "combined_evidence"})
         self.assertIsNone(matched["result"]["summary"]["official_probability"])
         self.assertIn("policy_checks", matched["result"])
         self.assertFalse(any("未做全网查重" in text for text in matched["result"]["limitations"]))
@@ -193,6 +195,118 @@ class BrowserAdapterTests(unittest.TestCase):
         retry = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][1]["id"])})["result"]
         self.assertEqual(2, retry["web_check"]["coverage"]["requested"])
         self.assertEqual(0, retry["web_check"]["coverage"]["failed"])
+
+    def test_sample_ten_is_dispersed_frozen_and_keeps_local_archive_complete(self):
+        base = self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
+        self.assertEqual(31, base["summary"]["total"])
+        self.assertTrue(base["summary"]["analyzed_all_archive_posts"])
+        first = request("/api/webcheck/plan", {"mode": "sample10", "limit": 3})["result"]
+        self.assertEqual((31, 10, "archive_order_evenly_spaced"),
+                         (first["total_eligible"], first["selected_total"], first["sample_method"]))
+        selected = []
+        plan = first
+        while True:
+            selected.extend(post["id"] for post in plan["posts"])
+            if plan["done"]:
+                break
+            plan = request("/api/webcheck/plan", {"mode": "sample10", "offset": plan["next_offset"], "limit": 3})["result"]
+        self.assertEqual([str(123456700 + index) for index in (0, 3, 6, 10, 13, 16, 20, 23, 26, 30)], selected)
+        self.assertEqual(0, plan["remaining"])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "all"})["ok"])
+        self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report("123456701")})["ok"])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "sample10", "offset": 11})["ok"])
+        self.assertEqual(31, browser_api._retained_archive["base_result"]["summary"]["total"])
+
+    def test_small_or_empty_sample_and_invalid_selection_are_explicit(self):
+        self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(4)])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "sample10", "limit": 11})["ok"])
+        self.assertFalse(browser_api._retained_archive["selection_locked"])
+        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
+        self.assertEqual(4, plan["selected_total"])
+        self.assertEqual(4, len(plan["posts"]))
+        self.assertTrue(plan["done"])
+        self.archive([{"id_str": "123456789", "full_text": "短帖"}])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "risk10"})["ok"])
+        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
+        self.assertEqual((0, 0, []), (plan["selected_total"], plan["remaining"], plan["posts"]))
+        self.assertTrue(plan["done"])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "all"})["ok"])
+
+    def test_result_readback_uses_current_selection_without_queries_or_reanalysis(self):
+        self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
+        request("/api/webcheck/plan", {"mode": "sample10", "limit": 3})
+        with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun analysis")):
+            response = request("/api/webcheck/result")
+        self.assertTrue(response["ok"], response)
+        result = response["result"]
+        self.assertEqual(("sample10", 10, 0), (result["web_check"]["coverage"]["mode"], result["web_check"]["coverage"]["selected_total"], result["web_check"]["coverage"]["searched"]))
+        self.assertEqual("incomplete", result["summary"]["combined_evidence"]["status"])
+        self.assertEqual({}, browser_api._retained_archive["web_posts"])
+        self.archive([{"id_str": "123456789", "full_text": "短帖"}])
+        request("/api/webcheck/plan", {"mode": "sample10"})
+        result = request("/api/webcheck/result")["result"]
+        self.assertEqual(("sample10", 0, 1), (result["summary"]["combined_evidence"]["web_mode"], result["summary"]["combined_evidence"]["selected_total"], result["summary"]["combined_evidence"]["unknown_own_posts"]))
+
+    def test_completed_sample_preserves_unselected_unknowns_and_offline_probability(self):
+        base = self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
+        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
+        report = self.report(plan["posts"][0]["id"], "matched", [self.match()])
+        for post in plan["posts"][1:]:
+            report["posts"].extend(self.report(post["id"], sources_checked=1)["posts"])
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(response["ok"], response)
+        result = response["result"]
+        coverage = result["web_check"]["coverage"]
+        self.assertEqual((10, 0, 21), (coverage["selected_total"], coverage["remaining"], coverage["unselected_eligible"]))
+        self.assertTrue(coverage["selection_complete"])
+        self.assertTrue(coverage["selection_search_complete"])
+        self.assertFalse(coverage["search_complete"])
+        self.assertFalse(coverage["all_eligible_requested"])
+        combined = result["summary"]["combined_evidence"]
+        self.assertEqual("needs_review", combined["status"])
+        self.assertEqual(1, combined["body_matched_posts"])
+        self.assertEqual(21, combined["unknown_own_posts"])
+        self.assertIn("不能推广", combined["conclusion"])
+        self.assertFalse(combined["probability_recalculated"])
+        self.assertEqual(base["summary"]["estimated_probability"], result["summary"]["estimated_probability"])
+        self.assertEqual(base["summary"]["probability_range"], result["summary"]["probability_range"])
+        original = next(item for item in result["policy_checks"]["requirements"] if item["id"] == "original_contribution")
+        self.assertEqual((1, 31, 3.2), (original["signal_count"], original["denominator"], original["signal_percent"]))
+        self.assertIsNone(result["summary"]["official_probability"])
+        self.assertIn("综合证据结论", markdown_report({}, result))
+        self.assertIn("公开来源证据合并", html_report({}, result))
+
+    def test_abandoned_dispatched_batch_is_unknown_and_never_replanned(self):
+        self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(7)])
+        plan = request("/api/webcheck/plan", {"limit": 3})["result"]
+        ids = [post["id"] for post in plan["posts"]]
+        response = request("/api/webcheck/abandon", {"session_id": plan["session_id"], "ids": ids, "reason": "response_unknown"})
+        self.assertTrue(response["ok"], response)
+        coverage = response["result"]["web_check"]["coverage"]
+        self.assertEqual((3, 4, 3, 0), (coverage["requested"], coverage["remaining"], coverage["execution_unknown_posts"], coverage["searched"]))
+        self.assertEqual(sum(len(post["text"]) for post in plan["posts"]), coverage["unknown_execution_chars"])
+        self.assertFalse(coverage["selection_search_complete"])
+        for post in response["result"]["web_check"]["posts"]:
+            self.assertEqual("unknown", post["execution_status"])
+            self.assertEqual(0, post["checked_chars"])
+            self.assertIsNone(post["max_similarity"])
+            self.assertIn({"code": "batch_response_unknown"}, post["issues"])
+        resumed = request("/api/webcheck/plan", {"offset": 0, "limit": 3})["result"]
+        self.assertEqual([str(123456700 + index) for index in (3, 4, 5)], [post["id"] for post in resumed["posts"]])
+        self.assertEqual(6, resumed["next_offset"])
+        self.assertIn("不表示没有检索消耗", " ".join(response["result"]["web_check"]["limitations"]))
+
+    def test_abandon_requires_valid_session_ids_and_does_not_destroy_returned_evidence(self):
+        self.archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT}])
+        plan = request("/api/webcheck/plan", {"limit": 1})["result"]
+        good = {"session_id": plan["session_id"], "ids": ["123456789"], "reason": "cancelled"}
+        for bad in ({**good, "session_id": "stale"}, {**good, "ids": ["123456790"]}, {**good, "ids": ["123456789"] * 2}, {**good, "reason": "never_sent"}):
+            self.assertFalse(request("/api/webcheck/abandon", bad)["ok"])
+        self.assertEqual({}, browser_api._retained_archive["web_posts"])
+        matched = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report("123456789", "matched", [self.match()])})["result"]
+        abandoned = request("/api/webcheck/abandon", good)["result"]
+        self.assertEqual(matched["web_check"]["posts"], abandoned["web_check"]["posts"])
+        self.assertEqual(0, abandoned["web_check"]["coverage"]["execution_unknown_posts"])
 
     def test_apply_keeps_local_truncation_and_snippet_unknowns(self):
         self.archive([{"id_str": "123456789", "full_text": TEXT * 100}])
