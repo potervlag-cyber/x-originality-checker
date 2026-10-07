@@ -248,7 +248,7 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
         if coverage.get("mode") == "sample10":
             result["requirements"][0]["interpretation"] += " 联网样本按归档顺序分散抽取，未将样本命中比例推广为全归档违规率。"
         elif coverage.get("mode") == "manual10":
-            result["requirements"][0]["interpretation"] += " 联网仅检查在本机归档中手动勾选的 10 条正文，未将所选帖子的命中比例推广为全归档违规率。"
+            result["requirements"][0]["interpretation"] += " 联网仅检查在本机归档中手动勾选的 10 条本人主帖正文（包含引用帖，不含回复和普通转帖），未将所选帖子的命中比例推广为全归档违规率；未联网回复仍保留在全部非普通转帖记录的证据不足统计中。"
     return result
 
 

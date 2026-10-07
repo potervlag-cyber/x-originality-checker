@@ -18,9 +18,9 @@
   let archiveClearPromise = Promise.resolve();
   let editingRecovery = false;
   const selectedPosts = new Set();
-  const POSTS_PER_PAGE = 30;
+  const POSTS_PER_PAGE = 50;
   let pickerSession = '';
-  let listOffset = 0;
+  let loadedPostsCount = 0;
   let listPage = null;
   let listRequest = 0;
   let listLoading = false;
@@ -408,13 +408,13 @@
     ++listRequest;
     listLoading = false;
     pickerSession = '';
-    listOffset = 0;
+    loadedPostsCount = 0;
     listPage = null;
     selectedPosts.clear();
     $('#post-search').value = '';
     $('#post-filter').value = 'all';
     $('#post-list').replaceChildren();
-    $('#posts-page-status').textContent = '';
+    $('#posts-list-status').textContent = '';
     $('#picker-summary').textContent = '';
     syncPicker();
   }
@@ -428,19 +428,21 @@
     $('#local-only').disabled = busy || webRunning || !latestResult;
     $('#post-search').disabled = busy || webRunning;
     $('#post-filter').disabled = busy || webRunning;
-    $('#posts-prev').disabled = busy || webRunning || listLoading || !listPage || listOffset === 0;
-    $('#posts-next').disabled = busy || webRunning || listLoading || !listPage || listPage.next_offset >= listPage.filtered_total;
+    const hasMore = !!listPage && listPage.next_offset < listPage.filtered_total;
+    $('#posts-more').hidden = !!listPage && !hasMore;
+    $('#posts-more').disabled = busy || webRunning || listLoading || !hasMore;
+    $('#posts-more').textContent = listLoading ? '正在加载主帖…' : '加载更多主帖';
     $('#post-list').setAttribute('aria-busy', String(listLoading));
     document.querySelectorAll('.post-select').forEach(input => {
       input.checked = selectedPosts.has(input.dataset.id);
-      input.disabled = locked || input.dataset.eligible !== 'true' || (!input.checked && selectedPosts.size >= 10);
+      input.disabled = locked || listLoading || input.dataset.eligible !== 'true' || (!input.checked && selectedPosts.size >= 10);
       input.closest('.post-choice').classList.toggle('is-selected', input.checked);
     });
   }
 
-  function renderPostPage(page) {
+  function renderPostPage(page, append = false) {
     const fragment = document.createDocumentFragment();
-    const types = {original: '主帖', article: '长文', reply: '回复', quote: '引用帖', repost: '普通转帖'};
+    const types = {original: '主帖', article: '长文', quote: '引用帖'};
     for (const post of page.posts) {
       const card = element('article', 'post-choice');
       card.dataset.id = String(post.id);
@@ -469,22 +471,22 @@
       if (!post.eligible) card.append(element('p', 'post-disabled-reason', post.disabled_reason || '此条正文无法用于联网比较。'));
       fragment.append(card);
     }
-    if (!page.posts.length) fragment.append(element('p', 'post-empty', $('#post-filter').value === 'selected' ? '当前筛选中没有已选帖子。' : '没有符合搜索或筛选条件的帖子。'));
-    $('#post-list').replaceChildren(fragment);
-    $('#post-list').scrollTop = 0;
-    $('#picker-summary').textContent = `归档共 ${count(page.total)} 条 · 可联网查询 ${count(page.total_eligible)} 条 · 当前筛选 ${count(page.filtered_total)} 条${page.total_eligible < 10 ? '。可检索正文不足 10 条，可选择仅查看本地报告。' : ''}`;
-    $('#posts-page-status').textContent = page.filtered_total
-      ? `${count(listOffset + 1)}–${count(page.next_offset)} / ${count(page.filtered_total)} 条`
-      : '0 条';
+    if (!append && !page.posts.length) fragment.append(element('p', 'post-empty', $('#post-filter').value === 'selected' ? '当前筛选中没有已选帖子。' : '没有符合搜索或筛选条件的帖子。'));
+    if (append) $('#post-list').append(fragment);
+    else { $('#post-list').replaceChildren(fragment); $('#post-list').scrollTop = 0; }
+    loadedPostsCount = page.next_offset;
+    $('#picker-summary').textContent = `归档 ${count(page.total_archive)} 条记录 · 本人主帖 ${count(page.total)} 条 · 可联网查询主帖 ${count(page.total_eligible)} 条。已排除 ${count(page.excluded_replies)} 条回复、${count(page.excluded_reposts)} 条普通转帖。${page.total_eligible < 10 ? '可检索主帖不足 10 条，可选择仅查看本地报告。' : ''}`;
+    $('#posts-list-status').textContent = page.next_offset < page.filtered_total
+      ? `已显示 ${count(loadedPostsCount)} / ${count(page.filtered_total)} 条主帖，向下滚动自动继续加载`
+      : `已显示当前范围内的全部 ${count(page.filtered_total)} 条主帖`;
     syncPicker();
   }
 
-  async function loadPostPage(offset = 0) {
-    if (!$('#network-dialog').open) return;
+  async function loadPostPage(offset = 0, append = false) {
+    if (!$('#network-dialog').open || (append && listLoading)) return;
     const ownGeneration = generation;
     const requestID = ++listRequest;
     listLoading = true;
-    listOffset = offset;
     syncPicker();
     try {
       const data = {offset, limit: POSTS_PER_PAGE, query: $('#post-search').value.trim(),
@@ -493,14 +495,15 @@
       const page = await runtime.request('/api/archive/posts', data);
       if (generation !== ownGeneration || requestID !== listRequest || !$('#network-dialog').open) return;
       if (pickerSession && page.session_id !== pickerSession) throw new Error('帖子列表会话已变化，请重新上传归档。');
+      if (append && page.offset !== loadedPostsCount) throw new Error('主帖列表加载顺序异常，请重新搜索或筛选。');
       pickerSession = page.session_id;
       listPage = page;
       listLoading = false;
-      renderPostPage(page);
+      renderPostPage(page, append);
     } catch (error) {
       if (generation !== ownGeneration || requestID !== listRequest || !$('#network-dialog').open) return;
       listLoading = false;
-      listPage = null;
+      if (!append) listPage = null;
       showDialogError(error?.message || '无法读取本机帖子列表，请重新上传 ZIP。');
       syncPicker();
     }
@@ -535,7 +538,7 @@
     $('#network-dialog-title').textContent = editingRecovery ? '继续所选 10 条的联网查询' : '选择 10 条帖子联网查重';
     $('#network-dialog-description').textContent = editingRecovery
       ? '本次帖子选择已固定。可修改连接信息，继续尚未发送的查询，已发送且结果未知的帖子不会重复查询。'
-      : '归档已在本机读取。浏览全部帖子，勾选 10 条后联网核对公开来源，并生成综合报告。';
+      : '归档已在本机读取。浏览归档中的全部本人主帖，勾选 10 条后联网核对公开来源，并生成综合报告。';
     $('#run-analysis').textContent = editingRecovery ? '继续查询并更新报告' : '确认 10 条并联网查重';
     $('#dialog-error').hidden = true;
     $('#dialog-error').textContent = '';
@@ -719,8 +722,15 @@
     }
   });
   $('#post-filter').addEventListener('change', () => { clearTimeout(searchTimer); loadPostPage(0); });
-  $('#posts-prev').addEventListener('click', () => loadPostPage(Math.max(0, listOffset - POSTS_PER_PAGE)));
-  $('#posts-next').addEventListener('click', () => { if (listPage) loadPostPage(listPage.next_offset); });
+  function loadMorePosts() {
+    if (busy || webRunning || listLoading || !listPage || listPage.next_offset >= listPage.filtered_total) return;
+    loadPostPage(listPage.next_offset, true);
+  }
+  $('#posts-more').addEventListener('click', loadMorePosts);
+  $('#post-list').addEventListener('scroll', () => {
+    const list = $('#post-list');
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 180) loadMorePosts();
+  });
   $('#network-dialog').addEventListener('cancel', event => {
     event.preventDefault();
     cancelNetworkSetup();

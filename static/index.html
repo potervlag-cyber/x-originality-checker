@@ -49,17 +49,17 @@
       <dialog class="network-dialog" id="network-dialog" aria-labelledby="network-dialog-title" aria-describedby="network-dialog-description">
         <form id="network-form" novalidate>
           <div class="dialog-heading"><h2 id="network-dialog-title">选择 10 条帖子联网查重</h2><button class="button quiet" id="cancel-network-setup" type="button" aria-label="关闭联网设置">关闭 ×</button></div>
-          <p id="network-dialog-description">归档已在本机读取。浏览全部帖子，勾选 10 条后联网核对公开来源，并生成综合报告。</p>
+          <p id="network-dialog-description">归档已在本机读取。浏览归档中的全部本人主帖，勾选 10 条后联网核对公开来源，并生成综合报告。</p>
           <p class="dialog-file" id="dialog-file"></p>
           <div class="post-picker-tools">
-            <label for="post-search">搜索归档帖子<input id="post-search" type="search" maxlength="200" placeholder="搜索正文关键词或帖子编号" autocomplete="off"></label>
-            <label for="post-filter">显示<select id="post-filter"><option value="all">全部帖子</option><option value="eligible">可联网查询</option><option value="selected">只看已选</option></select></label>
+            <label for="post-search">搜索全部主帖<input id="post-search" type="search" maxlength="200" placeholder="搜索正文关键词或帖子编号" autocomplete="off"></label>
+            <label for="post-filter">显示<select id="post-filter"><option value="all">全部主帖</option><option value="eligible">可联网查询</option><option value="selected">只看已选</option></select></label>
           </div>
           <div class="selection-bar"><strong id="selection-count" role="status" aria-live="polite">已选 0 / 10 条</strong><button class="button quiet" id="selection-clear" type="button">清空选择</button></div>
           <p class="picker-summary" id="picker-summary"></p>
-          <div class="post-list" id="post-list" aria-label="归档帖子列表" aria-busy="false"></div>
-          <div class="posts-pagination"><button class="button secondary" id="posts-prev" type="button">上一页</button><span id="posts-page-status" role="status" aria-live="polite"></span><button class="button secondary" id="posts-next" type="button">下一页</button></div>
-          <p class="dialog-hint">需选择 10 条。普通转帖、正文缺失或不完整、正文过短的帖子会显示不可选原因；翻页和搜索会保留选择。</p>
+          <div class="post-list" id="post-list" aria-label="本人主帖列表" aria-busy="false"></div>
+          <div class="posts-load-status"><span id="posts-list-status" role="status" aria-live="polite"></span><button class="button secondary" id="posts-more" type="button">加载更多主帖</button></div>
+          <p class="dialog-hint">只列本人主帖（含本人引用帖），不列回复和普通转帖。向下滚动可浏览全部主帖；搜索、加载更多会保留选择。正文缺失、不完整或过短的主帖仍列出并注明不可选原因。</p>
           <label class="access-code-label" for="web-token">服务访问码<input id="web-token" type="password" autocomplete="off" placeholder="填写此工具提供者给出的访问码"></label>
           <details class="service-settings"><summary>连接设置</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><p>搜索 API 密钥留在服务端，访问码仅在本页使用。所有使用者共用服务额度。</p><div class="web-actions"><button class="button secondary" id="web-connect" type="button">检查服务连接</button><button class="button quiet" id="cancel-connection" type="button" hidden>取消连接</button></div><p class="setup-status" id="setup-status" role="status" aria-live="polite">分析时会自动连接查重服务。</p></details>
           <label class="consent-option"><input id="web-consent" type="checkbox"><span>我同意将这 10 条帖子的文字发送给查重服务及搜索提供商。ZIP、媒体、私信和账号资料保留在本机；每条最多查前 5,000 字。</span></label>

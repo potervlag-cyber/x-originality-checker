@@ -219,6 +219,8 @@ class PolicyChecksTests(unittest.TestCase):
         self.assertEqual((1, 20, 5.0), (original["signal_count"], original["denominator"], original["signal_percent"]))
         self.assertEqual("not_estimated", policy["web_evidence_scope"]["projection"])
         self.assertIn("手动勾选的 10 条", original["interpretation"])
+        self.assertIn("不含回复和普通转帖", original["interpretation"])
+        self.assertIn("未联网回复", original["interpretation"])
         combined = combined_evidence({"total": 20, "counts": {}}, policy, web, posts)
         self.assertEqual("needs_review", combined["status"])
         self.assertEqual((1, 0, 19), (combined["body_matched_posts"], combined["snippet_matched_posts"], combined["unknown_own_posts"]))

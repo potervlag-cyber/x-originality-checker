@@ -174,7 +174,7 @@ class BrowserAdapterTests(unittest.TestCase):
             {"id_str": "123456702", "full_text": TEXT, "retweeted_status_id_str": "9"},
             {"id_str": "123456703", "full_text": "短帖"},
             {"id_str": "123456704", "full_text": TEXT, "truncated": True},
-            {"id_str": "123456705", "full_text": TEXT * 100, "in_reply_to_status_id_str": "8"},
+            {"id_str": "123456705", "full_text": TEXT * 100},
         ])
         first = self.plan({"limit": 1})["result"]
         self.assertEqual(12, first["total_eligible"])
@@ -432,7 +432,7 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertIsNone(browser_api._prepared_archive)
         self.assertIsNone(browser_api._retained_archive)
 
-    def test_local_post_list_paginates_every_record_and_disables_ineligible_text(self):
+    def test_local_post_list_paginates_all_main_records_and_disables_ineligible_text(self):
         records = [{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(40)]
         records.extend([
             {"id_str": "123456800", "full_text": TEXT, "retweeted_status_id_str": "9"},
@@ -442,18 +442,19 @@ class BrowserAdapterTests(unittest.TestCase):
         base = self.archive(records)
         before = copy.deepcopy(browser_api._retained_archive)
         first = request("/api/archive/posts")["result"]
-        self.assertEqual((43, 40, 43, 0, 30), tuple(first[key] for key in
+        self.assertEqual((42, 40, 42, 0, 30), tuple(first[key] for key in
                          ("total", "total_eligible", "filtered_total", "offset", "next_offset")))
+        self.assertEqual((43, 0, 1), tuple(first[key] for key in ("total_archive", "excluded_replies", "excluded_reposts")))
         self.assertEqual(30, len(first["posts"]))
         tail = request("/api/archive/posts", {"session_id": first["session_id"], "offset": first["next_offset"]})["result"]
-        self.assertEqual(43, tail["next_offset"])
-        self.assertEqual([str(123456700 + index) for index in range(40)] + ["123456800", "123456801", "123456802"],
+        self.assertEqual(42, tail["next_offset"])
+        self.assertEqual([str(123456700 + index) for index in range(40)] + ["123456801", "123456802"],
                          [post["id"] for post in first["posts"] + tail["posts"]])
         self.assertEqual({"id", "text", "text_truncated", "original_chars", "url", "created_at", "type", "eligible", "disabled_reason"}, set(first["posts"][0]))
-        for post, reason in zip(tail["posts"][-3:], ("普通转帖", "不足 24", "不完整")):
+        for post, reason in zip(tail["posts"][-2:], ("不足 24", "不完整")):
             self.assertFalse(post["eligible"])
             self.assertIn(reason, post["disabled_reason"])
-        self.assertEqual([], request("/api/archive/posts", {"offset": 43})["result"]["posts"])
+        self.assertEqual([], request("/api/archive/posts", {"offset": 42})["result"]["posts"])
         self.assertEqual(43, base["summary"]["total"])
         self.assertEqual(before, browser_api._retained_archive)
 
@@ -557,6 +558,78 @@ class BrowserAdapterTests(unittest.TestCase):
             ids = [item["id"] for item in browser_api._retained_archive["eligible"][:10]]
             self.assertFalse(self.plan({"ids": [post["id"], *ids[1:]]})["ok"])
             self.assertFalse(browser_api._retained_archive["selection_locked"])
+
+    def test_all_main_posts_across_three_parts_are_listed_without_reply_or_repost(self):
+        files, main_ids, reply_ids, repost_ids = [], [], [], []
+        for part in range(3):
+            records = []
+            for index in range(24):
+                pid = str(200000000 + part * 100 + index)
+                main_ids.append(pid)
+                records.append({"id_str": pid, "full_text": TEXT + f"ScopePOOL{part}-{index}",
+                                **({"is_quote_status": True, "quoted_status_id_str": "10"} if index == 23 else {})})
+            for index in range(5):
+                pid = str(300000000 + part * 100 + index)
+                reply_ids.append(pid)
+                records.append({"id_str": pid, "full_text": TEXT + "ReplyOnly ScopePOOL", "in_reply_to_status_id_str": "11"})
+            for index in range(3):
+                pid = str(400000000 + part * 100 + index)
+                repost_ids.append(pid)
+                records.append({"id_str": pid, "full_text": TEXT + "RepostOnly ScopePOOL", "retweeted_status_id_str": "12"})
+            if part == 2:
+                records.extend([{"id_str": "500000001", "full_text": "scopepool"},
+                                {"id_str": "500000002", "full_text": ""},
+                                {"id_str": "500000003", "full_text": TEXT + "ScopePOOL", "truncated": True}])
+            files.append({"name": "data/tweets.js" if part == 0 else f"data/tweets-part{part}.js",
+                          "text": f"window.YTD.tweets.part{part} = " + json.dumps([{"tweet": item} for item in records]) + ";"})
+        prepared = json.loads(browser_api.prepare_archive_json(json.dumps({"files": files})))
+        self.assertTrue(prepared["ok"], prepared)
+        finished = json.loads(browser_api.finish_archive_json('{"hashes":[]}'))
+        self.assertTrue(finished["ok"], finished)
+        result = finished["result"]
+        self.assertEqual(99, result["summary"]["total"])
+        self.assertTrue(result["summary"]["analyzed_all_archive_posts"])
+        self.assertEqual(3, result["coverage"]["post_files"])
+        self.assertEqual([item["name"] for item in files], result["coverage"]["post_file_names"])
+        before = copy.deepcopy(browser_api._retained_archive)
+        offset, all_posts = 0, []
+        while True:
+            response = request("/api/archive/posts", {"offset": offset, "limit": 50})
+            self.assertTrue(response["ok"], response)
+            page = response["result"]
+            self.assertEqual((75, 99, 72, 15, 9, 75), tuple(page[key] for key in
+                             ("total", "total_archive", "total_eligible", "excluded_replies", "excluded_reposts", "filtered_total")))
+            self.assertLessEqual(len(page["posts"]), 50)
+            all_posts.extend(page["posts"])
+            if page["next_offset"] == page["filtered_total"]:
+                break
+            self.assertGreater(page["next_offset"], offset)
+            offset = page["next_offset"]
+        self.assertEqual(main_ids + ["500000001", "500000002", "500000003"], [post["id"] for post in all_posts])
+        self.assertEqual(3, sum(post["type"] == "quote" for post in all_posts))
+        self.assertFalse(any(post["type"] in {"reply", "repost"} for post in all_posts))
+        self.assertEqual([False] * 3, [post["eligible"] for post in all_posts[-3:]])
+        for post, reason in zip(all_posts[-3:], ("不足 24", "正文为空", "不完整")):
+            self.assertIn(reason, post["disabled_reason"])
+        self.assertEqual(before, browser_api._retained_archive)
+        for query in ("ReplyOnly", "RepostOnly", reply_ids[-1], repost_ids[-1]):
+            page = request("/api/archive/posts", {"query": query})["result"]
+            self.assertEqual(0, page["filtered_total"])
+            self.assertEqual(75, page["total"])
+        self.assertEqual(74, request("/api/archive/posts", {"query": "scopepool"})["result"]["filtered_total"])
+        self.assertEqual(72, request("/api/archive/posts", {"query": "scopepool", "filter": "eligible"})["result"]["filtered_total"])
+        selected = request("/api/archive/posts", {"filter": "selected", "selected_ids": [reply_ids[0], repost_ids[0], main_ids[-1]]})["result"]
+        self.assertEqual([main_ids[-1]], [post["id"] for post in selected["posts"]])
+        for pid in (reply_ids[0], repost_ids[0]):
+            self.assertFalse(self.plan({"ids": [pid, *main_ids[:9]]})["ok"])
+            self.assertEqual(before, browser_api._retained_archive)
+        plan = self.plan({"ids": main_ids[:10]})["result"]
+        self.assertEqual(72, plan["total_eligible"])
+        readback = request("/api/webcheck/result")["result"]
+        self.assertEqual(72, readback["web_check"]["coverage"]["total_eligible"])
+        original = next(row for row in readback["policy_checks"]["requirements"] if row["id"] == "original_contribution")
+        self.assertEqual(90, original["denominator"])
+        self.assertEqual(90, original["unknown_count"])
 
 
 if __name__ == "__main__":

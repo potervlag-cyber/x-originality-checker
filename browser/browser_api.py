@@ -25,6 +25,7 @@ MAX_REQUEST_BYTES = 45 * 1024 * 1024
 _prepared_archive = None
 _retained_archive = None
 WEB_STATUSES = {"matched", "no_match", "partial", "failed", "skipped"}
+MAIN_POST_TYPES = {"original", "article", "quote"}
 
 
 def _integer(value, label, minimum=0, maximum=1000000):
@@ -104,7 +105,7 @@ def _web_check(state):
             "coverage": coverage, "posts": list(state["web_posts"].values()),
             "limitations": ["公开搜索收录和网页访问有缺口，实际全网覆盖未知；未发现匹配不能证明原创。",
                             "文字重合不能确认作者归属、授权、自转载或引用是否恰当，需人工复核。",
-                            "联网仅检查在本机归档中手动勾选的 10 条正文，不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
+                            "联网仅检查在本机归档中手动勾选的 10 条本人主帖正文（包含引用帖，不含回复和普通转帖），不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
                             "批次发出后取消、超时或响应无效时，上游是否执行及费用未知；返回的零成功次数只表示未取得证据，不表示没有检索消耗。",
                             "联网检查不重算离线参考概率，也不调用 X 官方审核或检查媒体来源。"]}
 
@@ -134,10 +135,14 @@ def _post_disabled_reason(post, ambiguous_ids):
         return "帖子编号对应多条冲突记录，无法唯一匹配；请核对归档。"
     if post["type"] == "repost":
         return "普通转帖不作为本人正文参加联网查重。"
-    if post["text_complete"] is not True:
-        return "归档正文不完整，无法确认需要核查的完整内容。"
+    if post["type"] == "reply":
+        return "回复不属于本次主帖选择范围，不参加联网查重。"
+    if post["type"] not in MAIN_POST_TYPES:
+        return "此记录不属于本次本人主帖选择范围。"
     if not post["text"].strip():
         return "正文为空，没有可检索文字。"
+    if post["text_complete"] is not True:
+        return "归档正文不完整，无法确认需要核查的完整内容。"
     if len(_clean(post["text"])) < 24:
         return "正文不足 24 个可比较字符，无法可靠检索。"
     return ""
@@ -154,7 +159,7 @@ def _archive_posts(data):
         raise ValueError("帖子筛选应为 all、eligible 或 selected。")
     selected_ids = set(_id_list(data.get("selected_ids", [])))
     reasons = state["disabled_reasons"]
-    filtered = [post for post in state["posts"]
+    filtered = [post for post in state["main_posts"]
                 if (filter_mode != "eligible" or not reasons[post["id"]])
                 and (filter_mode != "selected" or post["id"] in selected_ids)
                 and (not query or query in post["text"].casefold() or query in post["id"].casefold())]
@@ -164,7 +169,10 @@ def _archive_posts(data):
               "url": post["url"], "created_at": post["created_at"], "type": post["type"],
               "eligible": not bool(reasons[post["id"]]), "disabled_reason": reasons[post["id"]]}
              for post in filtered[offset:offset + limit]]
-    return {"session_id": state["session_id"], "total": len(state["posts"]),
+    return {"session_id": state["session_id"], "total": len(state["main_posts"]),
+            "total_archive": len(state["posts"]),
+            "excluded_replies": sum(post["type"] == "reply" for post in state["posts"]),
+            "excluded_reposts": sum(post["type"] == "repost" for post in state["posts"]),
             "total_eligible": len(state["eligible"]), "filtered_total": len(filtered),
             "offset": offset, "next_offset": offset + len(posts), "posts": posts}
 
@@ -204,7 +212,7 @@ def _web_plan(data):
     if mode != "manual10":
         raise ValueError("联网分析仅支持在归档中手动勾选 10 条帖子。")
     if len(state["eligible"]) < 10:
-        raise ValueError("归档中不足 10 条完整且可检索的非转帖正文，无法执行 10 条联网分析；仍可使用本地分析。")
+        raise ValueError("归档中不足 10 条完整且可检索的本人主帖正文（不含回复和普通转帖），无法执行 10 条联网分析；仍可使用本地分析。")
     selected = state["selected"]
     if not state["selection_locked"] or "ids" in data or "links" in data:
         ids = _id_list(data["ids"], exactly_ten=True) if "ids" in data else _manual_ids(data.get("links"))
@@ -213,7 +221,7 @@ def _web_plan(data):
         eligible = {post["id"]: post for post in state["eligible"]}
         for index, pid in enumerate(ids, 1):
             if pid not in eligible:
-                raise ValueError(f"第 {index} 条选择未匹配归档中可检索且编号唯一的完整非转帖正文；不会抓取链接或自动换选帖子。")
+                raise ValueError(f"第 {index} 条选择未匹配归档中可检索且编号唯一的完整本人主帖正文（不含回复和普通转帖）；不会抓取链接或自动换选帖子。")
         if state["selection_locked"] and ids != [post["id"] for post in selected]:
             raise ValueError("当前归档的 10 条联网选择已固定；请重新导入归档后再更换帖子。")
         selected = [eligible[pid] for pid in ids]
@@ -422,6 +430,7 @@ def finish_archive_json(media_json):
                          if id_counts[post["id"]] > 1 or post["url"] and url_counts[post["url"]] > 1}
         disabled_reasons = {post["id"]: _post_disabled_reason(post, ambiguous_ids) for post in posts}
         _retained_archive = {"session_id": uuid.uuid4().hex, "posts": posts,
+            "main_posts": [post for post in posts if post["type"] in MAIN_POST_TYPES],
             "assessed_posts": _prepared_archive.get("_assessed_posts", posts),
             "base_result": result,
             "disabled_reasons": disabled_reasons,
