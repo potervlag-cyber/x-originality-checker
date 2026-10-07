@@ -18,7 +18,104 @@ def tweet(identity, text=TEXT, **fields):
     return {"id_str": str(identity), "full_text": text, "created_at": "Wed Oct 07 00:00:00 +0000 2026", **fields}
 
 
+def independent_records(count=40):
+    # Each long body has disjoint character grams, so these fixtures test the
+    # probability rule without relying on one shared writing template.
+    return [tweet(1000000000000000000 + i, chr(0x5000 + i) * 60) for i in range(count)]
+
+
+def estimate(records, metadata=None):
+    return finish_archive(prepare_archive([file(records)], metadata))
+
+
 class ArchiveAdapterTests(unittest.TestCase):
+    def test_subjective_estimate_distinguishes_rich_material_from_repetitive_engagement(self):
+        clean = estimate(independent_records())
+        repetitive = estimate([tweet(1000000000000000000 + i, TEXT + "关注并转发") for i in range(40)])
+        self.assertEqual(75, clean["summary"]["estimated_probability"])
+        self.assertEqual("中", clean["summary"]["probability_confidence"])
+        self.assertEqual(5, repetitive["summary"]["estimated_probability"])
+        self.assertEqual("低", repetitive["summary"]["probability_confidence"])
+        self.assertGreater(clean["summary"]["estimated_probability"], repetitive["summary"]["estimated_probability"])
+        self.assertTrue(any(f["code"] == "engagement_template" and f["impact_points"] < 0 for f in repetitive["probability_factors"]))
+        self.assertIn("并不等于抄袭", next(f["detail"] for f in repetitive["probability_factors"] if f["code"] == "exact_repetition"))
+
+    def test_probability_is_not_just_nonduplicate_percentage_and_reposts_reduce_support(self):
+        single = estimate(independent_records(1))
+        rich = estimate(independent_records(40))
+        dominated = estimate(independent_records(40) + [tweet(2000000000000000000 + i, "RT @source: " + TEXT) for i in range(160)])
+        self.assertEqual(100, single["summary"]["nonduplicate_percent"])
+        self.assertEqual(100, rich["summary"]["nonduplicate_percent"])
+        self.assertLess(single["summary"]["estimated_probability"], rich["summary"]["estimated_probability"])
+        self.assertEqual(65, dominated["summary"]["estimated_probability"])
+        self.assertEqual("低", dominated["summary"]["probability_confidence"])
+        self.assertIn("不等于违规", next(f["detail"] for f in dominated["probability_factors"] if f["code"] == "repost_dominated"))
+
+    def test_missing_comparable_body_declines_numeric_guess_and_partial_material_stays_low(self):
+        empty = estimate([tweet("100000001", ""), tweet("100000002", "短句"), tweet("100000003", "RT @source: " + TEXT)])
+        self.assertIsNone(empty["summary"]["estimated_probability"])
+        self.assertEqual({"low": None, "high": None}, empty["summary"]["probability_range"])
+        self.assertIn("无法给出有意义", empty["summary"]["probability_explanation"])
+        sparse = estimate(independent_records(2) + [tweet(3000000000000000000 + i, "", truncated=True) for i in range(98)])
+        self.assertEqual(10, sparse["summary"]["estimated_probability"])
+        self.assertEqual("低", sparse["summary"]["probability_confidence"])
+        self.assertEqual(98, sparse["summary"]["comparison_excluded_posts"])
+
+    def test_probability_comparison_budget_widens_uncertainty_and_never_raises_confidence(self):
+        records = independent_records(40)
+        complete = estimate(records)
+        with patch("engine.MAX_NEAR_COMPARISONS", 0):
+            limited = estimate(records)
+        self.assertLess(limited["summary"]["estimated_probability"], complete["summary"]["estimated_probability"])
+        self.assertEqual("低", limited["summary"]["probability_confidence"])
+        normal_range = complete["summary"]["probability_range"]
+        limited_range = limited["summary"]["probability_range"]
+        self.assertGreater(limited_range["high"] - limited_range["low"], normal_range["high"] - normal_range["low"])
+
+    def test_duplicate_count_does_not_grow_distinct_bonus_or_confidence(self):
+        distinct = independent_records(20)
+        original = estimate(distinct)
+        duplicated = [tweet(4000000000000000000 + i, distinct[i % 20]["full_text"]) for i in range(200)]
+        repeated = estimate(duplicated)
+        for result in (original, repeated):
+            self.assertEqual(10, next(f["impact_points"] for f in result["probability_factors"] if f["code"] == "distinct_body_support"))
+            self.assertEqual("低", result["summary"]["probability_confidence"])
+        self.assertLess(repeated["summary"]["estimated_probability"], original["summary"]["estimated_probability"])
+
+    def test_probability_media_hash_does_not_prove_authorship_and_external_notes_lower_confidence(self):
+        records = independent_records(40)
+        for record in records:
+            record["extended_entities"] = {"media": [{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/common.jpg"}]}
+        media_result = {"hashes": [{"name": f"{record['id_str']}-common.jpg", "hash": "a" * 64} for record in records]}
+        no_media = estimate(independent_records(40))
+        hashed = finish_archive(prepare_archive([file(records)]), media_result)
+        self.assertLess(hashed["summary"]["estimated_probability"], no_media["summary"]["estimated_probability"])
+        self.assertEqual("低", hashed["summary"]["probability_confidence"])
+        self.assertTrue(any(f["code"] == "media_uninterpreted" for f in hashed["probability_factors"]))
+        notes = estimate(independent_records(40), {"unread_note_files": 1})
+        self.assertEqual("低", notes["summary"]["probability_confidence"])
+        self.assertTrue(any(f["code"] == "unread_long_text" for f in notes["probability_factors"]))
+
+    def test_probability_boundaries_factor_sum_range_contains_center_and_json_contract(self):
+        cases = [independent_records(1), independent_records(9), independent_records(100),
+                 [tweet(5000000000000000000 + i, TEXT + "关注并转发") for i in range(100)]]
+        for records in cases:
+            result = estimate(records)
+            summary = result["summary"]
+            center = summary["estimated_probability"]
+            self.assertGreaterEqual(center, 5)
+            self.assertLessEqual(center, 85)
+            self.assertEqual(0, center % 5)
+            self.assertEqual(center, sum(f["impact_points"] for f in result["probability_factors"]))
+            self.assertLessEqual(summary["probability_range"]["low"], center)
+            self.assertGreaterEqual(summary["probability_range"]["high"], center)
+            self.assertGreaterEqual(summary["probability_range"]["low"], 0)
+            self.assertLessEqual(summary["probability_range"]["high"], 100)
+            self.assertIn(summary["probability_confidence"], {"低", "中"})
+            self.assertEqual({"version": "subjective-rules-1.0", "calibrated": False, "method": "heuristic"}, summary["probability_model"])
+            self.assertIsNone(summary["official_probability"])
+            self.assertEqual(result, json.loads(json.dumps(result, ensure_ascii=False, allow_nan=False)))
+
     def test_more_than_2000_posts_all_analyzed_across_parts(self):
         records = [tweet(1000000000000000000 + i, f"第 {i} 条短记录") for i in range(2601)]
         prepared = prepare_archive([file(records[:2000]), file(records[2000:], "data/tweets-part1.js", 1)], {"input_bytes": 300 * 1024 * 1024, "zip_entries": 12000})

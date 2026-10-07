@@ -105,6 +105,12 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertTrue(finished["ok"])
         self.assertEqual(1, finished["result"]["summary"]["total"])
         self.assertIsNone(finished["result"]["summary"]["official_probability"])
+        summary = finished["result"]["summary"]
+        self.assertIsInstance(summary["estimated_probability"], int)
+        self.assertLessEqual(summary["probability_range"]["low"], summary["estimated_probability"])
+        self.assertGreaterEqual(summary["probability_range"]["high"], summary["estimated_probability"])
+        self.assertFalse(summary["probability_model"]["calibrated"])
+        self.assertEqual(summary["estimated_probability"], sum(factor["impact_points"] for factor in finished["result"]["probability_factors"]))
         self.assertIsNone(browser_api._prepared_archive)
         self.assertFalse(json.loads(browser_api.finish_archive_json('{}'))["ok"])
 

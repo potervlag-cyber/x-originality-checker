@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="description" content="选择 X 官方归档 ZIP，在浏览器内自动分析归档中的全部帖子，查看文本重复情况和原创风险原因。">
+  <meta name="description" content="选择 X 官方归档 ZIP，在浏览器内自动分析归档中的全部帖子，查看本工具估计的原创通过概率及分析原因。">
   <title>原作 · X 归档原创分析</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./runtime.js" defer></script>
@@ -20,7 +20,7 @@
       <section class="intro" aria-labelledby="page-title">
         <p class="eyebrow">从归档开始，了解你的内容</p>
         <h1 id="page-title">一个 ZIP，分析全部发帖。</h1>
-        <p class="intro-copy">直接选择从 X 下载的归档压缩包。系统自动解压发帖记录，<br class="desktop-break">分析重复内容与材料缺口，给出原因。</p>
+        <p class="intro-copy">直接选择从 X 下载的归档压缩包。系统自动解压全部发帖，<br class="desktop-break">给出原创通过概率的工具估计，以及分析原因。</p>
       </section>
       <section class="upload-card" aria-labelledby="upload-title">
         <div class="drop-zone" id="drop-zone">
@@ -45,12 +45,12 @@
         <div class="result-heading"><div><p class="eyebrow">分析完成</p><h2 id="result-title">你的归档分析结果</h2></div><button class="button secondary" id="change-file" type="button">换一个 ZIP</button></div>
         <p class="result-meta" id="result-meta"></p>
         <div class="conclusion-card">
-          <div class="probability-result"><p class="metric-label">官方通过概率</p><strong class="probability-value">暂无法可靠估算</strong><p id="probability-explanation">X 未公开审核模型，当前工具也没有经官方审核结果校准的数据。</p></div>
+          <div class="probability-result" aria-labelledby="probability-label"><p class="metric-label" id="probability-label">原创通过概率（工具估计）</p><strong class="probability-value" id="probability-value">—</strong><div class="probability-meta" id="probability-meta" hidden><span id="probability-range"></span><span class="confidence-badge" id="probability-confidence"></span></div><p id="probability-explanation">根据归档内的文本信号与材料完整性给出参考估计。</p></div>
           <div class="observed-result"><p class="metric-label">可比较正文未重复占比</p><strong class="observed-value" id="nonduplicate-value">—</strong><p id="nonduplicate-detail"></p></div>
         </div>
-        <p class="metric-footnote">未重复占比反映本归档内的文本比较结果，不能证明全网原创，也不能换算为官方通过概率。</p>
+        <p class="metric-footnote">概率由本工具的规则估计，尚未用真实审核样本校准；主观参考范围不是统计置信区间。未重复占比是另一项文本观察指标。</p>
         <div class="stats-grid" id="stats-grid"></div>
-        <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">为什么得到这些结果</h3><div class="reason-list" id="reason-list"></div></section>
+        <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">这次估计的原因</h3><div class="reason-list" id="reason-list"></div></section>
         <details class="detail-section" id="examples-section" hidden><summary>查看需复核的帖子示例 <span id="examples-count"></span></summary><div class="example-list" id="example-list"></div></details>
         <details class="detail-section"><summary>检测范围与局限</summary><div class="scope-content" id="scope-content"></div></details>
         <div class="result-footer"><span>分析结果只保留在本页面，关闭页面后清除。</span><button class="button quiet" id="download-result" type="button">下载分析结果 ↓</button></div>

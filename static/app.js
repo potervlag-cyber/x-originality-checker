@@ -45,6 +45,12 @@
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${Number(value.toFixed(1))}%` : '—';
   }
 
+  function estimateImpact(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+    if (!value) return '估计参考项';
+    return `估计${value > 0 ? '上调' : '下调'} ${Number(Math.abs(value).toFixed(1))} 个百分点`;
+  }
+
   function dateOnly(value) {
     const matched = String(value || '').match(/^\d{4}-\d{2}-\d{2}/);
     return matched ? matched[0] : '';
@@ -67,7 +73,19 @@
     const types = summary.types || {};
     const period = [dateOnly(coverage.actual_start), dateOnly(coverage.actual_end)].filter(Boolean);
     $('#result-meta').textContent = `${file.name} · 已检测 ${count(summary.total)} 条归档记录${period.length === 2 ? ` · ${period[0]} 至 ${period[1]}` : ''}`;
-    $('#probability-explanation').textContent = summary.probability_explanation || 'X 未公开审核模型，当前工具也没有经官方审核结果校准的数据。';
+    const estimatedProbability = percent(summary.estimated_probability);
+    const hasEstimate = estimatedProbability !== '—';
+    $('#probability-value').textContent = hasEstimate ? estimatedProbability : '材料不足，无法估计';
+    $('#probability-value').classList.toggle('unavailable', !hasEstimate);
+    $('#probability-meta').hidden = !hasEstimate;
+    const range = summary.probability_range || {};
+    const validRange = percent(range.low) !== '—' && percent(range.high) !== '—' && range.low <= range.high;
+    $('#probability-range').textContent = validRange ? `主观参考范围 ${percent(range.low)}–${percent(range.high)}` : '主观参考范围暂不确定';
+    const confidence = ['低', '中'].includes(summary.probability_confidence) ? summary.probability_confidence : '低';
+    $('#probability-confidence').textContent = `判断把握：${confidence}`;
+    $('#probability-explanation').textContent = summary.probability_explanation || (hasEstimate
+      ? '依据归档内的文本信号与材料完整性给出参考估计，尚未用真实审核结果校准。'
+      : '归档缺少本人可比较正文，无法给出参考概率。');
     $('#nonduplicate-value').textContent = percent(summary.nonduplicate_percent);
     const excludedNote = Number.isSafeInteger(summary.comparison_excluded_posts) && summary.comparison_excluded_posts > 0
       ? `另有 ${count(summary.comparison_excluded_posts)} 条非转帖记录缺少可比较正文。` : '';
@@ -96,13 +114,20 @@
     }
     $('#stats-grid').replaceChildren(fragment);
 
-    const reasons = Array.isArray(result.reasons) ? result.reasons : [];
+    const factors = Array.isArray(result.probability_factors) ? result.probability_factors.filter(item => item && typeof item === 'object') : [];
+    const factorCodes = new Set(factors.map(item => item.code).filter(Boolean));
+    const reasons = Array.isArray(result.reasons) ? result.reasons.filter(item => item && typeof item === 'object' && !factorCodes.has(item.code)) : [];
     const reasonFragment = document.createDocumentFragment();
-    const displayedReasons = reasons.length ? reasons : [{title:'检测结果需要结合创作背景复核',detail:'未提供可解释的风险原因。这不代表已经证明原创或满足官方审核。'}];
+    const mergedReasons = [...factors.map(item => ({...item, model_factor:true})), ...reasons];
+    const displayedReasons = mergedReasons.length ? mergedReasons : [{title:'需要结合创作背景复核',detail:'当前材料未提供足够的判断依据，需结合实际创作过程核实。'}];
     displayedReasons.slice(0, 20).forEach((reason, index) => {
       const item = element('div', 'reason-item');
       const copy = element('div', 'reason-copy');
-      copy.append(element('h4', '', reason.title || '检测发现'), element('p', '', reason.detail || '请结合原帖与创作背景复核。'));
+      const title = element('div', 'reason-heading');
+      title.append(element('h4', '', reason.title || '检测发现'));
+      const impact = reason.model_factor ? (reason.code === 'subjective_start' ? '规则起点 50%' : estimateImpact(reason.impact_points)) : '';
+      if (impact) title.append(element('span', 'reason-impact', impact));
+      copy.append(title, element('p', '', reason.detail || '请结合原帖与创作背景复核。'));
       item.append(element('span', 'reason-number', String(index + 1).padStart(2, '0')), copy);
       reasonFragment.append(item);
     });
@@ -131,7 +156,11 @@
 
     const scope = element('div');
     scope.append(element('p', '', `读取 ${count(Array.isArray(coverage.post_files) ? coverage.post_files.length : coverage.post_files)} 个帖子文件；归档包含 ${count(coverage.archive_records)} 条记录，已检测 ${count(coverage.analyzed_posts)} 条。没有按日期筛选或只抽取申请样本。`));
-    const notes = [...(Array.isArray(coverage.notes) ? coverage.notes : []), ...(Array.isArray(result.warnings) ? result.warnings : []), ...(Array.isArray(result.limitations) ? result.limitations : [])];
+    const notes = [
+      '原创通过概率是本工具根据归档信号给出的启发式参考估计，尚未用真实 X 审核样本校准，不能视为官方或经验证的实际通过率。',
+      '主观参考范围用于表达材料与检查方法的不确定性，不是统计置信区间；材料缺失降低判断把握，不等于抄袭。',
+      '这一估计只涉及原创材料判断，不包括会员、展示量、认证粉丝、地区、处罚状态等收益资格门槛。',
+      ...(Array.isArray(coverage.notes) ? coverage.notes : []), ...(Array.isArray(result.warnings) ? result.warnings : []), ...(Array.isArray(result.limitations) ? result.limitations : [])];
     const list = element('ul');
     for (const note of [...new Set(notes.map(String))]) list.append(element('li', '', note));
     if (list.childElementCount) scope.append(list);
