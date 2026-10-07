@@ -77,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
                 source = ROOT / "materials" / "guide.md"
             return self.send_json({"text": source.read_text(encoding="utf-8-sig")})
         browser_routes = {"/" + name: ROOT / "browser" / name for name in ("runtime.js", "python-worker.js", "archive.js", "browser_api.py", "webcheck-client.js")}
-        browser_routes.update({"/" + name: ROOT / name for name in ("archive_adapter.py", "policy_checks.py", "engine.py", "importers.py", "reports.py")})
+        browser_routes.update({"/" + name: ROOT / name for name in ("archive_adapter.py", "policy_checks.py", "compliance.py", "engine.py", "importers.py", "reports.py")})
         browser_routes["/webcheck-config.json"] = ROOT / "deployment/webcheck-config.json"
         runtime_names = ("pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json", "LICENSE.pyodide", "LICENSE.cpython")
         browser_routes.update({"/vendor/pyodide/" + name: ROOT / "vendor" / "pyodide" / name for name in runtime_names})

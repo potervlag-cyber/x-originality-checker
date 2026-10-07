@@ -26,7 +26,7 @@
       <section class="upload-card" aria-labelledby="upload-title">
         <div class="network-toggle-row" id="network-toggle-row">
           <label class="network-switch"><span>联网查重</span><input id="network-enabled" type="checkbox" role="switch" aria-describedby="network-toggle-note"><span class="switch-track" aria-hidden="true"></span></label>
-          <p id="network-toggle-note">开启后，上传 ZIP 再从帖子列表勾选 10 条</p>
+          <p id="network-toggle-note">开启后选 10 条，查询来源并评估原创要求</p>
         </div>
         <div class="drop-zone" id="drop-zone">
           <svg class="upload-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M29 6H13a4 4 0 0 0-4 4v28a4 4 0 0 0 4 4h22a4 4 0 0 0 4-4V16L29 6Z" stroke="currentColor" stroke-width="1.7"/><path d="M29 6v10h10M22 12h4m-4 5h4m-4 5h4m-4 5h4m-4 5h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -62,7 +62,7 @@
           <p class="dialog-hint">只列本人主帖（含本人引用帖），不列回复和普通转帖。向下滚动可浏览全部主帖；搜索、加载更多会保留选择。正文缺失、不完整或过短的主帖仍列出并注明不可选原因。</p>
           <label class="access-code-label" for="web-token">服务访问码<input id="web-token" type="password" autocomplete="off" placeholder="填写此工具提供者给出的访问码"></label>
           <details class="service-settings"><summary>连接设置</summary><label>服务地址<input id="web-endpoint" type="url" placeholder="https://你的查重服务" autocomplete="url"></label><p>搜索 API 密钥留在服务端，访问码仅在本页使用。所有使用者共用服务额度。</p><div class="web-actions"><button class="button secondary" id="web-connect" type="button">检查服务连接</button><button class="button quiet" id="cancel-connection" type="button" hidden>取消连接</button></div><p class="setup-status" id="setup-status" role="status" aria-live="polite">分析时会自动连接查重服务。</p></details>
-          <label class="consent-option"><input id="web-consent" type="checkbox"><span>我同意将这 10 条帖子的文字发送给查重服务及搜索提供商。ZIP、媒体、私信和账号资料保留在本机；每条最多查前 5,000 字。</span></label>
+          <label class="consent-option"><input id="web-consent" type="checkbox"><span>我同意将这 10 条帖子的文字发送给查重服务、搜索提供商及已配置的语义分析服务，并将公开来源片段用于对比。ZIP、媒体、私信和账号资料保留在本机；每条最多查前 5,000 字，截断正文不计为完整语义评估。</span></label>
           <p class="dialog-error" id="dialog-error" role="alert" hidden></p>
           <div class="dialog-actions"><button class="button quiet" id="local-only" type="button">仅查看本地报告</button><button class="button secondary" id="cancel-network-button" type="button">取消</button><button class="button primary" id="run-analysis" type="submit" disabled>确认 10 条并联网查重</button></div>
         </form>
@@ -72,12 +72,13 @@
         <p class="result-meta" id="result-meta"></p>
         <section class="combined-conclusion" id="combined-conclusion" aria-labelledby="combined-title"><p class="eyebrow">综合报告</p><h3 id="combined-title">归档检查结果</h3><p id="combined-description"></p><p class="combined-coverage" id="combined-coverage"></p><p class="combined-run-status" id="combined-run-status" role="status" aria-live="polite"></p></section>
         <div class="conclusion-card">
-          <div class="probability-result" aria-labelledby="probability-label"><p class="metric-label" id="probability-label">归档信号参考概率（工具估计）</p><strong class="probability-value" id="probability-value">—</strong><div class="probability-meta" id="probability-meta" hidden><span id="probability-range"></span><span class="confidence-badge" id="probability-confidence"></span></div><p id="probability-explanation">根据归档内的文本信号与材料完整性给出参考估计。</p></div>
+          <div class="compliance-result" aria-labelledby="compliance-label"><p class="metric-label" id="compliance-label">原创要求加权符合率 · 参考范围</p><strong class="compliance-value" id="compliance-value">—</strong><div class="compliance-meta" id="compliance-meta"><span id="compliance-assessed"></span><span id="compliance-coverage"></span><span id="compliance-unknown"></span></div><p id="compliance-scope"></p><p id="compliance-explanation">根据逐项内容评估与证据计算；未知项目保留未知。</p></div>
           <div class="observed-result"><p class="metric-label">可比较正文未重复占比</p><strong class="observed-value" id="nonduplicate-value">—</strong><p id="nonduplicate-detail"></p></div>
         </div>
-        <p class="metric-footnote">概率由本工具的规则估计，尚未用真实审核样本校准；主观参考范围不是统计置信区间。未重复占比是另一项文本观察指标。</p>
+        <p class="metric-footnote">符合率按工具设定的要求权重计算，范围表示未核验项目可能造成的差异。它不是审核通过概率或官方评分；正文未重复占比仅为归档观察，不参与符合率。</p>
+        <section class="compliance-section" aria-labelledby="compliance-title"><h3 id="compliance-title">逐项符合度与判断依据</h3><p class="section-description">逐项查看参考评分、评估覆盖和原文依据。未发现相似来源不能直接算作符合原创要求。</p><div class="compliance-list" id="compliance-list"></div><details class="weight-settings"><summary>调整原创要求权重</summary><p>默认权重由工具设定，可按你的关注点调整，四项之和需为 100%。调整只重新汇总现有证据。</p><form id="weight-form" novalidate><div class="weight-grid"><label>原创贡献与实质新视角<input type="number" id="weight-original_contribution" min="0" max="100" step="1" value="50">%</label><label>创作方式<input type="number" id="weight-automation" min="0" max="100" step="1" value="20">%</label><label>内容是否完全围绕变现<input type="number" id="weight-monetization_focus" min="0" max="100" step="1" value="10">%</label><label>知识产权与素材权利<input type="number" id="weight-intellectual_property" min="0" max="100" step="1" value="20">%</label></div><button class="button secondary" id="apply-weights" type="submit">应用权重</button><p id="weight-status" role="status" aria-live="polite"></p></form></details></section>
         <div class="stats-grid" id="stats-grid"></div>
-        <section class="policy-section" aria-labelledby="policy-title"><h3 id="policy-title">对原创内容要求的不符合程度</h3><p class="section-description" id="policy-description"></p><div class="policy-list" id="policy-list"></div><p class="section-description" id="policy-source"></p></section>
+        <section class="policy-section" aria-labelledby="policy-title"><h3 id="policy-title">归档与来源辅助风险线索</h3><p class="section-description" id="policy-description"></p><div class="policy-list" id="policy-list"></div><p class="section-description" id="policy-source"></p></section>
         <section class="webcheck-section" aria-labelledby="webcheck-title">
           <h3 id="webcheck-title">全网文字查重 · 公开来源检索</h3>
           <p class="section-description">检索可被搜索服务找到的网页和 X 帖子，核对相似片段及来源。收录与访问权限限制了覆盖；搜索不到不代表原创，来源相似也不等于搬运。</p>
@@ -85,7 +86,7 @@
           <div class="web-actions" id="web-recovery" hidden><button class="button primary" id="web-start" type="button">继续剩余联网查询</button><button class="button secondary" id="edit-connection" type="button">修改连接信息</button></div>
           <div class="web-evidence" id="web-evidence"></div>
         </section>
-        <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">这次估计的原因</h3><div class="reason-list" id="reason-list"></div></section>
+        <section class="reason-section" aria-labelledby="reason-title"><h3 id="reason-title">归档辅助观察</h3><div class="reason-list" id="reason-list"></div></section>
         <details class="detail-section" id="examples-section" hidden><summary>查看需复核的帖子示例 <span id="examples-count"></span></summary><div class="example-list" id="example-list"></div></details>
         <details class="detail-section"><summary>检测范围与局限</summary><div class="scope-content" id="scope-content"></div></details>
         <div class="result-footer"><span>分析结果只保留在本页面，关闭页面后清除。</span><button class="button quiet" id="download-result" type="button">下载分析结果 ↓</button></div>

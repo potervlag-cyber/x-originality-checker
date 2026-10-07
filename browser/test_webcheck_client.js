@@ -46,6 +46,74 @@ test('web check transmits the post allowlist only after explicit consent', async
   assert.equal(request.options.headers.Authorization, 'Bearer service-access');
 });
 
+test('only verified whole planned text carries the minimal complete boolean', async () => {
+  const requests = [];
+  const client = OriginalityWebCheck.create('https://service.example', {fetch: async (_url, options) => {
+    if (options.method === 'GET') return response(200, {ready:true,content_review:{configured:false}});
+    const payload = JSON.parse(options.body); requests.push(payload);
+    return response(200, {schema_version:1,coverage:{},posts:payload.posts.map(post=>({id:post.id,status:'no_match'}))});
+  }});
+  await client.status();
+  const text = 'Complete local archive text fragment';
+  await client.check([{id:'1',text,original_chars:text.length,text_truncated:false},
+    {id:'2',text,original_chars:text.length+1,text_truncated:true}, {id:'3',text},
+    {id:'4',text,original_chars:text.length,text_truncated:true}]);
+  assert.deepEqual(requests[0].posts.map(post=>post.text_complete), [true,false,false,false]);
+  assert.deepEqual(Object.keys(requests[0].posts[0]).sort(), ['created_at','id','text','text_complete','url']);
+  const unicodeText = text + ' 😀';
+  await client.check([{id:'5',text:unicodeText,original_chars:[...unicodeText].length,text_truncated:false}]);
+  assert.equal(requests[1].posts[0].text_complete, true);
+});
+
+test('an old service status preserves the four-field search protocol', async () => {
+  const requests = [];
+  const client = OriginalityWebCheck.create('https://service.example', {fetch: async (_url, options) => {
+    if (options.method === 'GET') return response(200, {ready:true,provider:{configured:true}});
+    const payload = JSON.parse(options.body); requests.push(payload);
+    assert.deepEqual(Object.keys(payload.posts[0]).sort(), ['created_at','id','text','url']);
+    return response(200, {schema_version:1,coverage:{},posts:[{id:'1',status:'no_match'}]});
+  }});
+  await client.status();
+  await client.check([{id:'1',text:'complete',original_chars:8,text_truncated:false,media:['not sent']}]);
+  assert.equal(requests.length, 1);
+});
+
+test('a pending or cancelled status never enables the new post field', async () => {
+  const controller = new AbortController(), requests = [];
+  let resolveStatus;
+  const client = OriginalityWebCheck.create('https://service.example', {fetch: async (_url, options) => {
+    if (options.method === 'GET') return new Promise(resolve => { resolveStatus = resolve; });
+    const payload = JSON.parse(options.body); requests.push(payload);
+    return response(200, {schema_version:1,coverage:{},posts:[{id:'1',status:'no_match'}]});
+  }});
+  const rejected = assert.rejects(client.status(controller.signal), /已取消/);
+  await client.check([{id:'1',text:'complete',original_chars:8,text_truncated:false}]);
+  controller.abort();
+  await rejected;
+  resolveStatus(response(200, {ready:true,content_review:{configured:true}}));
+  await Promise.resolve();
+  await client.check([{id:'1',text:'complete',original_chars:8,text_truncated:false}]);
+  assert.ok(requests.every(request => !Object.hasOwn(request.posts[0], 'text_complete')));
+});
+
+test('a fresh old-service status clears previously negotiated capabilities', async () => {
+  let newService = true;
+  const requests = [];
+  const client = OriginalityWebCheck.create('https://service.example', {fetch: async (_url, options) => {
+    if (options.method === 'GET') return response(200, newService ? {ready:true,content_review:{configured:false}} : {ready:true});
+    const payload = JSON.parse(options.body); requests.push(payload);
+    return response(200, {schema_version:1,coverage:{},posts:[{id:'1',status:'no_match'}]});
+  }});
+  const posts = [{id:'1',text:'complete',original_chars:8,text_truncated:false}];
+  await client.status();
+  await client.check(posts);
+  newService = false;
+  await client.status();
+  await client.check(posts);
+  assert.equal(requests[0].posts[0].text_complete, true);
+  assert.equal(Object.hasOwn(requests[1].posts[0], 'text_complete'), false);
+});
+
 test('service URLs reject embedded credentials and non-HTTPS remote hosts', () => {
   for (const url of ['https://secret@example.com','https://example.com?token=secret','http://remote.example','file:///tmp/key']) {
     assert.throws(() => OriginalityWebCheck.create(url));

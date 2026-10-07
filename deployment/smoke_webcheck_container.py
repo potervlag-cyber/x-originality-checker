@@ -118,7 +118,7 @@ def main():
         require(uid == "10001", "Running container has the wrong effective UID.")
         source_files = json.loads(docker("exec", container, "python", "-c",
                                        "import json,os; print(json.dumps({'app': sorted(os.listdir('/app')), 'deployment': sorted(os.listdir('/app/deployment'))}))").stdout)
-        require(source_files == {"app": ["deployment", "webcheck.py", "webcheck_server.py"],
+        require(source_files == {"app": ["content_review.py", "deployment", "webcheck.py", "webcheck_server.py"],
                                  "deployment": ["container_entrypoint.py", "container_healthcheck.py"]},
                 "Image application directory contains files outside the service allowlist.")
 

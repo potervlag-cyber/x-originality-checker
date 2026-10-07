@@ -55,6 +55,26 @@ def request(port, method="GET", path="/api/webcheck/status", body=None, host="pr
 
 
 class ContainerDeploymentTests(unittest.TestCase):
+    def test_docker_copy_sources_are_explicitly_allowed_without_widening_context(self):
+        import shlex
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8-sig")
+        patterns = [line.strip() for line in (ROOT / ".dockerignore").read_text(encoding="utf-8-sig").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual("*", patterns[0])
+        sources = []
+        for line in dockerfile.splitlines():
+            if line.lstrip().upper().startswith("COPY "):
+                tokens = shlex.split(line)
+                sources.extend(token for token in tokens[1:-1] if not token.startswith("--"))
+        self.assertEqual({"webcheck.py", "webcheck_server.py", "content_review.py",
+                          "deployment/container_entrypoint.py", "deployment/container_healthcheck.py"}, set(sources))
+        for source in sources:
+            self.assertTrue((ROOT / source).is_file(), source)
+            self.assertIn("!" + source, patterns, f"Docker COPY source is absent from the build-context allowlist: {source}")
+        self.assertEqual({"!Dockerfile", "!.dockerignore", "!deployment/", *("!" + source for source in sources)},
+                         {pattern for pattern in patterns if pattern.startswith("!")})
+        self.assertIn("deployment/*", patterns)
+
     def launch(self, configured=False):
         port = spare_port()
         env = test_environment(port, configured)

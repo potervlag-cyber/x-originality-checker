@@ -3,7 +3,7 @@
 // A fixed, same-origin runtime is supplied by the static-site build.
 const PYODIDE_VERSION = '0.27.7';
 const RUNTIME_URL = new URL('./vendor/pyodide/', self.location.href).href;
-const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'policy_checks.py', 'archive_adapter.py', 'browser_api.py'];
+const PYTHON_FILES = ['importers.py', 'engine.py', 'reports.py', 'policy_checks.py', 'compliance.py', 'archive_adapter.py', 'browser_api.py'];
 let python = null;
 let ready = false;
 let queue = Promise.resolve();

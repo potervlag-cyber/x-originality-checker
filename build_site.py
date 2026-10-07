@@ -38,6 +38,7 @@ SITE_SOURCES = {
     "browser_api.py": "browser/browser_api.py",
     "archive_adapter.py": "archive_adapter.py",
     "policy_checks.py": "policy_checks.py",
+    "compliance.py": "compliance.py",
     "engine.py": "engine.py",
     "importers.py": "importers.py",
     "reports.py": "reports.py",

@@ -1,4 +1,4 @@
-"""Read X archive post files and estimate an uncalibrated, subjective pass chance.
+"""Read X archive post files and preserve evidence-scoped compliance judgments.
 
 The browser ZIP reader supplies only allowlisted post JSON and explicitly matched
 media hashes. No archive JavaScript is executed and no account/DM file is needed.
@@ -14,120 +14,12 @@ from urllib.parse import unquote, urlsplit
 from engine import analyze, _clean
 from importers import ImportErrorDetail, MAX_ARCHIVE_POSTS, _safe_member, normalize_project
 from policy_checks import assess_policy
+from compliance import assess_compliance
 
 POST_FILE = re.compile(r"(?:tweets?|posts?)(?:[-_]part\d+)?\.(?:js|json)$", re.I)
 ASSIGNMENT = re.compile(r"\s*window\.YTD\.(?:tweets?|posts?)(?:_part\d+)?\.part\d+\s*=\s*")
 MAX_ARCHIVE_FILE_TEXT = 64 * 1024 * 1024
 MAX_ARCHIVE_FILES_TEXT = 128 * 1024 * 1024
-PROBABILITY_EXPLANATION = "X 未公开原创审核模型、样本权重或可校准的通过数据；仅凭归档无法可靠估算官方通过概率。"
-PROBABILITY_MODEL = {"version": "subjective-rules-1.0", "calibrated": False, "method": "heuristic"}
-
-
-def _nearest_five(value):
-    # Half-up rounding is explicit and independent of Python's ties-to-even.
-    return int((value + 2.5) // 5) * 5
-
-
-def estimate_probability(posts, coverage, metadata):
-    """Return the tool's subjective estimate, not a learned or official model.
-
-    All weights below are human design choices, not measured pass frequencies:
-    start at 50; distinct comparable texts add 0/10/15/20/25 for counts
-    below 10 / 10 / 30 / 60 / 100. Fewer than 5 distinct comparable bodies
-    cost 20, 5-9 cost 10; repeated publication cannot remove this penalty.
-    Comparable-body coverage adds 10 at >=80%, subtracts 10
-    below 50%, or 20 below 20%. Exact repeated-body affected share costs up
-    to 35; near-only share up to 15; repeated engagement share up to 20.
-    A >=50% repost share costs 5 or 10 at >=75% (less original-work evidence,
-    not misconduct). Uninterpreted media costs up to 5 based on own-post share.
-    Limited approximate comparisons cost 10. Deductions round to 5 points.
-    The final center rounds to 5 and is capped at 5-85, never 0 or 100.
-
-    The interval is also subjective, not a confidence interval: at least
-    +/-20 for unsearched external sources, expanded for sparse/divergence/
-    missing/media/limited-comparison evidence, at most +/-45 and clipped
-    to 0-95. Confidence is only low/medium; it is never calibrated or high.
-    No comparable own text means no meaningful numerical estimate.
-    """
-    own = [p for p in posts if p["type"] != "repost"]
-    comparable = [p for p in own if p["text_complete"] is True and len(_clean(p["text"])) >= 24]
-    factors = []
-
-    def factor(code, title, detail, points):
-        factors.append({"code": code, "title": title, "detail": detail, "impact_points": points})
-
-    explanation = "本工具根据归档材料作出的主观通过概率估计，权重由人工设计、未经真实审核结果校准；不是 X 官方概率，也不是收益分成资格判断。范围为主观不确定范围，不是统计置信区间。"
-    if not comparable:
-        factor("no_comparable_text", "材料不足以估计", "没有完整且去除链接/标点后至少 24 字符的非普通转帖正文；只有转帖、短帖、媒体或不完整正文时不猜测通过概率。", 0)
-        return {"estimated_probability": None, "probability_range": {"low": None, "high": None},
-                "probability_confidence": "低", "probability_explanation": explanation + "当前没有可比较的本人正文，无法给出有意义的估计。",
-                "probability_model": dict(PROBABILITY_MODEL)}, factors
-
-    total, n, own_count = len(posts), len(comparable), len(own)
-    distinct = len({_clean(p["text"]) for p in comparable})
-    body_share = n / own_count
-    post_codes = [{r["code"] for r in p["reasons"]} for p in comparable]
-    exact_share = sum("internal_exact" in codes for codes in post_codes) / n
-    near_share = sum("internal_near" in codes and "internal_exact" not in codes for codes in post_codes) / n
-    engagement_share = sum("repeated_engagement_phrase" in codes for codes in post_codes) / n
-    repost_share = (total - own_count) / total
-    media_share = sum(bool(p["media"]) for p in own) / own_count
-    limited = coverage.get("approximate_comparison_limited") is True
-    external_notes = bool(metadata.get("unread_note_files"))
-
-    factor("subjective_start", "主观估计起点", "以 50% 作为本规则的人工设计起点，不代表官方历史通过率。", 50)
-    quantity_points = next((points for threshold, points in ((100, 25), (60, 20), (30, 15), (10, 10)) if distinct >= threshold), 0)
-    if quantity_points:
-        factor("distinct_body_support", "多份独立正文提供支持", f"{n} 条可比较正文中有 {distinct} 份去掉链接和标点后不同的正文；这是材料数量支持，不是来源原创证明。", quantity_points)
-    factor("sample_size", "可比较样本数量", f"本次有 {n} 条可比较正文、{distinct} 份去重正文；样本不足惩罚按去重正文数量判断，重复发帖数量不能消除此惩罚或增加信心。", -20 if distinct < 5 else (-10 if distinct < 10 else 0))
-    body_points = 10 if body_share >= 0.8 else (-20 if body_share < 0.2 else (-10 if body_share < 0.5 else 0))
-    if body_points:
-        factor("body_coverage", "可比较正文覆盖", f"{own_count} 条非普通转帖记录中 {n} 条具备完整且足够长度的正文（{body_share:.1%}）；短帖、缺失和截断正文未作为正面支持。", body_points)
-    for code, title, share, weight, detail in (
-        ("exact_repetition", "重复正文降低支持", exact_share, 35, "完全或仅标点/链接不同的重复正文降低材料多样性；本人重复发布并不等于抄袭。"),
-        ("near_repetition", "相似正文需要复核", near_share, 15, "高度相似且未计入完全重复的正文，需要核实模板和新增内容；不直接认定搬运。"),
-        ("engagement_template", "重复互动请求影响判断", engagement_share, 20, "多条正文重复明确互动请求，作为本工具较谨慎的行为信号，不认定官方违规。"),
-    ):
-        if share:
-            factor(code, title, f"涉及 {share:.1%} 的可比较正文。" + detail, -_nearest_five(weight * share))
-    if repost_share >= 0.5:
-        factor("repost_dominated", "材料以普通转帖为主", f"普通转帖占全部归档记录 {repost_share:.1%}，可用于证明本人独立创作的材料相对有限；转帖本身不等于违规。", -10 if repost_share >= 0.75 else -5)
-    if media_share:
-        factor("media_uninterpreted", "媒体内容尚未识别", f"{media_share:.1%} 的非普通转帖记录带媒体；哈希只核对相同文件，未识别画面、来源或作者归属。", -_nearest_five(5 * media_share))
-    if limited:
-        factor("near_coverage_limit", "近似比对覆盖受限", "所有帖子已扫描并进行完全重复分组，但近似比较触发预算或索引限制，未发现重复的正面支持降低。", -10)
-    if external_notes:
-        factor("unread_long_text", "独立长文尚未关联", "归档另有未解析关联的独立长帖文件；不把未知长文当成完整内容，扩大主观估计范围。", 0)
-    factor("external_sources_unknown", "全网来源仍未知", "没有执行全网查重，也没有验证作者归属；因此范围至少为中心上下 20 个百分点，信心最多为中。", 0)
-
-    raw = sum(item["impact_points"] for item in factors)
-    rounded = _nearest_five(raw)
-    center = max(5, min(85, rounded))
-    if rounded != raw:
-        factor("rounding", "按 5% 步进显示", "避免把主观设计包装成精确预测。", rounded - raw)
-    if center != rounded:
-        factor("estimate_bound", "保守估计边界", "主观中心限制在 5%–85%，避免给出必过或必不过结论。", center - rounded)
-    width = 20
-    if n < 10 or distinct < 10:
-        width += 10
-    if body_share < 0.5:
-        width += 10
-    elif body_share < 0.8:
-        width += 5
-    if media_share > 0.3:
-        width += 5
-    if repost_share >= 0.5:
-        width += 5
-    if limited or external_notes:
-        width += 10
-    width = min(45, width)
-    confidence = "中" if distinct >= 30 and body_share >= 0.8 and media_share <= 0.3 and repost_share < 0.5 and not limited and not external_notes else "低"
-    return {"estimated_probability": center,
-            "probability_range": {"low": max(0, center - width), "high": min(95, center + width)},
-            "probability_confidence": confidence, "probability_explanation": explanation,
-            "probability_model": dict(PROBABILITY_MODEL)}, factors
-
-
 def _id(value):
     if isinstance(value, (str, int)):
         return str(value).strip()
@@ -391,9 +283,8 @@ def finish_archive(prepared, media_result=None):
     if missing_media:
         warnings.append(f"{len(missing_media)} 个请求的媒体文件名未唯一匹配；不解析私信或账号资料。")
     meta = prepared["metadata"]
-    probability, probability_factors = estimate_probability(assessed, coverage, meta)
     return {"summary": {"total": len(assessed), "types": {"posts": types["original"] + types["article"], "reply": types["reply"], "repost": types["repost"], "quote": types["quote"]},
-        "counts": result["summary"]["counts"], "official_probability": None, **probability,
+        "counts": result["summary"]["counts"], "compliance": assess_compliance(project["posts"]),
         "nonduplicate_percent": round(numerator / len(own) * 100, 1) if own else None,
         "nonduplicate_numerator": numerator, "nonduplicate_denominator": len(own),
         "comparison_excluded_posts": own_total - len(own),
@@ -403,7 +294,7 @@ def finish_archive(prepared, media_result=None):
         "media_completeness_percent": round(coverage["hashed_media"] / coverage["media_references"] * 100, 1) if coverage["media_references"] else None,
         "thread_groups": prepared["thread_groups"], "analyzed_all_archive_posts": True},
         "policy_checks": assess_policy(project["posts"], assessed),
-        "probability_factors": probability_factors, "reasons": reasons, "examples": examples, "coverage": {
+        "reasons": reasons, "examples": examples, "coverage": {
             "actual_start": coverage["actual_start"], "actual_end": coverage["actual_end"], "post_files": len(prepared["post_files"]), "post_file_names": prepared["post_files"],
             "archive_records": prepared["archive_records"], "analyzed_posts": len(assessed),
             "zip_entries": meta.get("zip_entries"), "compressed_bytes": meta.get("input_bytes"),
@@ -414,7 +305,7 @@ def finish_archive(prepared, media_result=None):
                 "线程按归档中实际存在的父帖子 ID 关联；不能证明线程没有删除或缺失分段。",
                 "未重复比例 = 未发现账号内完全/高度相似正文的可比较记录 ÷ 可比较记录数；可比较记录为完整且去掉链接/标点后至少 24 字符的非普通转帖正文，包括回复及引用。缺少正文、短帖和不完整长帖不参与此比例，另列为无法比较，不是原创通过概率。",
                 *coverage["notes"]]},
-        "warnings": warnings, "limitations": [probability["probability_explanation"], PROBABILITY_EXPLANATION,
+        "warnings": warnings, "limitations": ["未取得实质内容评估时，四项要求与符合率保持证据不足；未知项不加分或扣分。",
             "不访问 X、来源链接或其他网站，未做全网查重；他人文字搬运可能没有账号内重复信号。",
             "文件哈希只比较相同字节，不识别媒体画面、作者归属、授权或语义改写。",
             "不判断会员、展示量、认证粉丝、账号处罚或收益分成的其他门槛。"]}

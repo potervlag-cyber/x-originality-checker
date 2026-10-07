@@ -23,6 +23,9 @@
     const clearTimer = timer => timers.clearTimeout(timer);
     const token = typeof options.accessToken === 'string' ? options.accessToken.trim() : '';
     if (/[\r\n]/.test(token)) throw new Error('服务访问码格式无效。');
+    // Old services accept only the four search fields. Negotiate the additional
+    // completeness boolean only after a current status response advertises it.
+    let supportsCompleteText = false, statusRevision = 0;
 
     function statusWait(phase, attempt) {
       try { options.onStatusWait?.({phase, attempt, max_wait_ms: STATUS_TIMEOUT_MS}); }
@@ -128,13 +131,25 @@
       }
     }
     return Object.freeze({
-      status: signal => send('/api/webcheck/status', null, signal),
+      async status(signal) {
+        const revision = ++statusRevision;
+        supportsCompleteText = false;
+        const data = await send('/api/webcheck/status', null, signal);
+        if (revision === statusRevision && !signal?.aborted) {
+          supportsCompleteText = data.content_review !== null && typeof data.content_review === 'object' && !Array.isArray(data.content_review);
+        }
+        return data;
+      },
       async check(posts, signal) {
         if (!Array.isArray(posts) || !posts.length || posts.length > 10) throw new Error('每批需提供 1 至 10 条帖子。');
         const payload = posts.map(post => {
           if (!post || typeof post.id !== 'string' || typeof post.text !== 'string' || post.text.length > 5000) throw new Error('联网查询片段格式无效。');
           // Do not serialize the plan, archive project, account, or media metadata.
-          return {id: post.id, text: post.text, url: String(post.url || ''), created_at: String(post.created_at || '')};
+          const item = {id: post.id, text: post.text, url: String(post.url || ''), created_at: String(post.created_at || '')};
+          if (supportsCompleteText) {
+            item.text_complete = post.text_truncated === false && Number.isSafeInteger(post.original_chars) && post.original_chars === [...post.text].length;
+          }
+          return item;
         });
         const report = await send('/api/webcheck', {consent: true, posts: payload}, signal);
         if (report.schema_version !== 1 || !Array.isArray(report.posts) || report.posts.length !== payload.length ||

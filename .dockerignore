@@ -5,6 +5,7 @@
 !.dockerignore
 !webcheck.py
 !webcheck_server.py
+!content_review.py
 !deployment/
 deployment/*
 !deployment/container_entrypoint.py

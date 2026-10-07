@@ -95,9 +95,9 @@ def _item(identifier, title, requirement, posts, checked, signals, evidence, int
         status = "signals_found"
         degree = {"high": "高（需复核）", "medium": "中（需复核）", "low": "低（仅弱线索）"}[strength]
     elif checked_count:
-        status, degree = "no_detected_signal", "无法判断"
+        status, degree = "no_detected_signal", "未发现风险线索"
     else:
-        status, degree = "unknown", "无法判断"
+        status, degree = "unknown", "证据不足"
     return {"id": identifier, "title": title, "official_requirement": requirement,
             "scope": "auxiliary" if auxiliary else "content", "status": status,
             "degree": degree, "degree_basis": "工具风险线索强度；不是 X 官方认定的不符合程度。",
@@ -239,7 +239,7 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
     result = {"source": dict(SOURCE), "disclaimer": "不符合程度以工具风险线索强度显示；百分比是线索涉及记录占非普通转帖记录的比例，不是官方违规率、抄袭率或评分。未检查、证据不足和未发现线索不能当作符合要求。",
             "denominator_label": "本次非普通转帖记录；包括回复和引用，不能据此认定属于奖励范围。",
             "requirements": [*requirements, auxiliary],
-            "account_eligibility": {"status": "unknown", "degree": "无法判断", "reason": "内容报告不能核验会员、认证粉丝、首页时间线曝光、所在地区、账号状态或其他收益资格。", "official_score": None}}
+            "account_eligibility": {"status": "unknown", "degree": "证据不足", "reason": "内容报告不能核验会员、认证粉丝、首页时间线曝光、所在地区、账号状态或其他收益资格。", "official_score": None}}
     if isinstance(web_check, dict):
         coverage = web_check.get("coverage", {})
         result["web_evidence_scope"] = {key: coverage.get(key) for key in
@@ -253,7 +253,7 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
 
 
 def combined_evidence(summary, policy, web_check, posts=None):
-    """Combine evidence without revising the uncalibrated offline probability."""
+    """Combine local and web risk evidence without inventing content judgments."""
     coverage = web_check.get("coverage", {}) if isinstance(web_check, dict) else {}
     known_posts = {str(post.get("id", "")): post for post in posts or []}
     body, snippets, body_signals = set(), set(), set()
@@ -317,5 +317,4 @@ def combined_evidence(summary, policy, web_check, posts=None):
         "selection_complete": coverage.get("selection_complete", False),
         "all_eligible_requested": coverage.get("all_eligible_requested", False),
         "execution_unknown_posts": coverage.get("execution_unknown_posts", 0),
-        "unknown_execution_chars": coverage.get("unknown_execution_chars", 0),
-        "official_probability": None, "probability_recalculated": False}
+        "unknown_execution_chars": coverage.get("unknown_execution_chars", 0)}

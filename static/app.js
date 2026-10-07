@@ -17,6 +17,7 @@
   let runMessage = '';
   let archiveClearPromise = Promise.resolve();
   let editingRecovery = false;
+  let weightUpdating = false;
   const selectedPosts = new Set();
   const POSTS_PER_PAGE = 50;
   let pickerSession = '';
@@ -59,6 +60,8 @@
     $('#drop-zone').classList.remove('drag-over');
     $('#network-toggle-row').hidden = value;
     $('#network-enabled').disabled = value;
+    $('#apply-weights').disabled = value || webRunning || weightUpdating || !latestResult;
+    for (const id of COMPLIANCE_IDS) $(`#weight-${id}`).disabled = value || webRunning || weightUpdating;
     syncPicker();
   }
 
@@ -68,12 +71,6 @@
 
   function percent(value) {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${Number(value.toFixed(1))}%` : '—';
-  }
-
-  function estimateImpact(value) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return '';
-    if (!value) return '估计参考项';
-    return `估计${value > 0 ? '上调' : '下调'} ${Number(Math.abs(value).toFixed(1))} 个百分点`;
   }
 
   function dateOnly(value) {
@@ -95,6 +92,50 @@
       if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) return url.href;
     } catch { /* Untrusted source URLs are rendered as text only. */ }
     return '';
+  }
+
+  const COMPLIANCE_IDS = ['original_contribution', 'automation', 'monetization_focus', 'intellectual_property'];
+
+  function renderCompliance(compliance) {
+    const data = compliance || {};
+    const range = data.evidence_range || {};
+    const scored = percent(data.score) !== '—' && percent(range.low) !== '—' && percent(range.high) !== '—' && range.low <= range.high;
+    $('#compliance-value').textContent = scored ? (range.low === range.high ? percent(range.low) : `${percent(range.low)}–${percent(range.high)}`) : '证据不足，暂无综合符合率';
+    $('#compliance-value').classList.toggle('unavailable', !scored);
+    $('#compliance-assessed').textContent = percent(data.score) !== '—' ? `已评估部分加权符合率 ${percent(data.score)}` : '原创贡献尚未取得足够评估依据';
+    $('#compliance-coverage').textContent = `有参考评估的加权覆盖 ${percent(data.coverage_percent)}`;
+    $('#compliance-unknown').textContent = `未核验要求权重 ${percent(data.unknown_weight)}`;
+    const scope = data.evidence_scope || {};
+    $('#compliance-scope').textContent = scope.mode === 'selected10'
+      ? `符合率范围仅针对本次手动选择的 ${count(scope.scope_count)} 条主帖，未选帖子不纳入此率，不能推广到全部归档。`
+      : '本次仅有本地归档材料；未取得逐项语义与来源证据时保留未知。';
+    $('#compliance-explanation').textContent = data.explanation || '综合范围由已取得的逐项参考评估与未知权重计算；未核验项目不自动计为符合，也不按不符合扣分。';
+    const fragment = document.createDocumentFragment();
+    for (const criterion of Array.isArray(data.criteria) ? data.criteria : []) {
+      const card = element('article', 'compliance-card');
+      const heading = element('div', 'compliance-heading');
+      heading.append(element('h4', '', criterion.title || criterion.id), element('strong', '', percent(criterion.score) === '—' ? '证据不足' : `参考符合度 ${percent(criterion.score)}`));
+      card.append(heading, element('p', 'compliance-count', `权重 ${percent(criterion.weight)} · 已评估 ${count(criterion.evaluated_count)} / ${count(scope.scope_count)} 条 · 未核验 ${count(criterion.unknown_count)} 条`));
+      if (criterion.explanation) card.append(element('p', '', criterion.explanation));
+      const gaps = Object.entries(criterion.unknown_reasons || {}).filter(([, total]) => Number.isInteger(total) && total > 0);
+      if (gaps.length) card.append(element('p', 'compliance-count', gaps.map(([reason, total]) => `${reason} ${count(total)} 条`).join('；')));
+      const evidence = Array.isArray(criterion.evidence) ? criterion.evidence : [];
+      for (const item of evidence.slice(0, 4)) {
+        const detail = element('details', 'compliance-evidence');
+        detail.append(element('summary', '', `帖子 ${item.post_id || item.id || '—'} · ${percent(item.score) === '—' ? '待核验' : percent(item.score)} · 查看依据`));
+        detail.append(element('p', '', item.rationale || item.detail || '当前证据不足，需要补充材料。'));
+        if (item.post_excerpt) detail.append(element('blockquote', '', `帖子原文：${item.post_excerpt}`));
+        if (item.source_excerpt) detail.append(element('blockquote', '', `来源原文：${item.source_excerpt}`));
+        const url = safeSourceURL(item.source_url);
+        if (url) { const link = element('a', '', '核对来源 ↗'); link.href = url; link.target = '_blank'; link.rel = 'noreferrer'; detail.append(link); }
+        card.append(detail);
+      }
+      if (criterion.evidence_total > evidence.length) card.append(element('p', '', `这里展示 ${count(evidence.length)} 条依据；完整逐帖评估保存在下载报告中。`));
+      fragment.append(card);
+    }
+    $('#compliance-list').replaceChildren(fragment);
+    for (const id of COMPLIANCE_IDS) if (typeof data.weights?.[id] === 'number') $(`#weight-${id}`).value = data.weights[id];
+    $('#apply-weights').disabled = busy || webRunning || weightUpdating || !latestResult;
   }
 
   function renderPolicy(policy) {
@@ -138,6 +179,10 @@
     if (coverage.execution_unknown_posts > 0) fragment.append(element('p', 'web-summary', `${count(coverage.execution_unknown_posts)} 条已发送但未能确认结果，记为未知；后续不会自动重复发送这些帖子。`));
     if (coverage.text_truncated_posts > 0) fragment.append(element('p', 'web-summary', `${count(coverage.text_truncated_posts)} 条正文只检索了部分文字，剩余内容未查；即使未发现相似来源也不计为完整检查。`));
     const posts = Array.isArray(report.posts) ? report.posts : [];
+    const unconfigured = posts.filter(post => !post.content_review || post.content_review.status === 'not_configured').length;
+    const reviewFailed = posts.filter(post => post.content_review?.status === 'failed').length;
+    if (unconfigured) fragment.append(element('p', 'web-summary', `${count(unconfigured)} 条尚未取得语义评估：服务需要配置内容分析模型。搜索结果仍保留，未知项目不计为符合。`));
+    if (reviewFailed) fragment.append(element('p', 'web-summary', `${count(reviewFailed)} 条语义评估未成功，相关要求继续保留未知；已取得的来源证据仍可复核。`));
     const matched = posts.filter(post => Array.isArray(post.matches) && post.matches.length);
     for (const post of matched.slice(0, 30)) {
       const card = element('article', 'source-card');
@@ -274,19 +319,7 @@
     const canResume = runSettings?.mode === 'network' && !['completed', 'local_failed'].includes(runPhase)
       && Number.isSafeInteger(webCoverage.remaining) && webCoverage.remaining > 0 && webOffset !== Number.MAX_SAFE_INTEGER;
     $('#web-recovery').hidden = !canResume;
-    const estimatedProbability = percent(summary.estimated_probability);
-    const hasEstimate = estimatedProbability !== '—';
-    $('#probability-value').textContent = hasEstimate ? estimatedProbability : '材料不足，无法估计';
-    $('#probability-value').classList.toggle('unavailable', !hasEstimate);
-    $('#probability-meta').hidden = !hasEstimate;
-    const range = summary.probability_range || {};
-    const validRange = percent(range.low) !== '—' && percent(range.high) !== '—' && range.low <= range.high;
-    $('#probability-range').textContent = validRange ? `主观参考范围 ${percent(range.low)}–${percent(range.high)}` : '主观参考范围暂不确定';
-    const confidence = ['低', '中'].includes(summary.probability_confidence) ? summary.probability_confidence : '低';
-    $('#probability-confidence').textContent = `判断把握：${confidence}`;
-    $('#probability-explanation').textContent = summary.probability_explanation || (hasEstimate
-      ? '依据归档内的文本信号与材料完整性给出参考估计，尚未用真实审核结果校准。'
-      : '归档缺少本人可比较正文，无法给出参考概率。');
+    renderCompliance(summary.compliance);
     $('#nonduplicate-value').textContent = percent(summary.nonduplicate_percent);
     const excludedNote = Number.isSafeInteger(summary.comparison_excluded_posts) && summary.comparison_excluded_posts > 0
       ? `另有 ${count(summary.comparison_excluded_posts)} 条非转帖记录缺少可比较正文。` : '';
@@ -317,19 +350,14 @@
     renderPolicy(result.policy_checks);
     renderWebCheck(result.web_check);
 
-    const factors = Array.isArray(result.probability_factors) ? result.probability_factors.filter(item => item && typeof item === 'object') : [];
-    const factorCodes = new Set(factors.map(item => item.code).filter(Boolean));
-    const reasons = Array.isArray(result.reasons) ? result.reasons.filter(item => item && typeof item === 'object' && !factorCodes.has(item.code)) : [];
+    const reasons = Array.isArray(result.reasons) ? result.reasons.filter(item => item && typeof item === 'object') : [];
     const reasonFragment = document.createDocumentFragment();
-    const mergedReasons = [...factors.map(item => ({...item, model_factor:true})), ...reasons];
-    const displayedReasons = mergedReasons.length ? mergedReasons : [{title:'需要结合创作背景复核',detail:'当前材料未提供足够的判断依据，需结合实际创作过程核实。'}];
+    const displayedReasons = reasons.length ? reasons : [{title:'需要结合创作背景复核',detail:'当前材料未提供足够的判断依据，需结合实际创作过程核实。'}];
     displayedReasons.slice(0, 20).forEach((reason, index) => {
       const item = element('div', 'reason-item');
       const copy = element('div', 'reason-copy');
       const title = element('div', 'reason-heading');
       title.append(element('h4', '', reason.title || '检测发现'));
-      const impact = reason.model_factor ? (reason.code === 'subjective_start' ? '规则起点 50%' : estimateImpact(reason.impact_points)) : '';
-      if (impact) title.append(element('span', 'reason-impact', impact));
       copy.append(title, element('p', '', reason.detail || '请结合原帖与创作背景复核。'));
       item.append(element('span', 'reason-number', String(index + 1).padStart(2, '0')), copy);
       reasonFragment.append(item);
@@ -360,9 +388,9 @@
     const scope = element('div');
     scope.append(element('p', '', `读取 ${count(Array.isArray(coverage.post_files) ? coverage.post_files.length : coverage.post_files)} 个帖子文件；归档包含 ${count(coverage.archive_records)} 条记录，本地已检测 ${count(coverage.analyzed_posts)} 条。联网范围单独记录，手动指定的 10 条不代表全归档联网检查。`));
     const notes = [
-      '原创通过概率是本工具根据归档信号给出的启发式参考估计，尚未用真实 X 审核样本校准，不能视为官方或经验证的实际通过率。',
-      '主观参考范围用于表达材料与检查方法的不确定性，不是统计置信区间；材料缺失降低判断把握，不等于抄袭。',
-      '这一估计只涉及原创材料判断，不包括会员、展示量、认证粉丝、地区、处罚状态等收益资格门槛。',
+      '符合率按原创要求的逐项参考评估与工具权重计算；发帖数量、账号内未重复占比和查重相似度不直接转为符合分。',
+      '符合率范围的下限是已有参考评分的加权贡献，上限加上未知权重；它不是统计置信区间或官方审核通过概率。',
+      '只有本次所选主帖进入联网符合率；会员、展示量、认证粉丝、地区、处罚状态等账号门槛不属于此率。',
       ...(Array.isArray(coverage.notes) ? coverage.notes : []), ...(Array.isArray(result.warnings) ? result.warnings : []), ...(Array.isArray(result.limitations) ? result.limitations : [])];
     const list = element('ul');
     for (const note of [...new Set(notes.map(String))]) list.append(element('li', '', note));
@@ -385,6 +413,7 @@
     const replacing = !!pendingFile || !!latestResult;
     pendingFile = file;
     latestResult = null;
+    $('#weight-status').textContent = '';
     latestFilename = '';
     runSettings = null;
     runPhase = 'setup';
@@ -789,6 +818,46 @@
     anchor.href = url; anchor.download = 'X归档原创分析.json';
     document.body.append(anchor); anchor.click(); anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+
+  $('#weight-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy || webRunning || weightUpdating || !latestResult) return;
+    const weights = {};
+    for (const id of COMPLIANCE_IDS) {
+      const input = $(`#weight-${id}`);
+      const value = Number(input.value);
+      if (!input.value.trim() || !Number.isSafeInteger(value) || value < 0 || value > 100) {
+        $('#weight-status').textContent = '每项权重应为 0–100 的整数。'; return;
+      }
+      weights[id] = value;
+    }
+    if (Object.values(weights).reduce((total, value) => total + value, 0) !== 100) {
+      $('#weight-status').textContent = '四项权重之和需为 100%。'; return;
+    }
+    if (weights.original_contribution <= 0) {
+      $('#weight-status').textContent = '原创贡献权重需要大于 0%，不能只按主题计算原创符合率。'; return;
+    }
+    const ownGeneration = generation;
+    weightUpdating = true;
+    $('#apply-weights').disabled = true;
+    for (const id of COMPLIANCE_IDS) $(`#weight-${id}`).disabled = true;
+    $('#weight-status').textContent = '正在按新权重汇总现有证据…';
+    try {
+      const result = await runtime.request('/api/compliance/weights', {weights});
+      if (ownGeneration !== generation) return;
+      latestResult = result;
+      finishReport();
+      $('#weight-status').textContent = '已更新权重，复用了本次评估依据。';
+    } catch (error) {
+      if (ownGeneration === generation) $('#weight-status').textContent = error?.message || '无法更新权重，请重新尝试。';
+    } finally {
+      weightUpdating = false;
+      if (ownGeneration === generation) {
+        $('#apply-weights').disabled = busy || webRunning || !latestResult;
+        for (const id of COMPLIANCE_IDS) $(`#weight-${id}`).disabled = busy || webRunning;
+      }
+    }
   });
 
   if (runtime?.init) {

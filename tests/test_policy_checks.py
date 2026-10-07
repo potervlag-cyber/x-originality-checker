@@ -25,7 +25,7 @@ class PolicyChecksTests(unittest.TestCase):
         self.assertIn("不是官方完整清单", result["source"]["note"])
         self.assertEqual("unknown", result["account_eligibility"]["status"])
         for item in result["requirements"]:
-            self.assertEqual("无法判断", item["degree"])
+            self.assertEqual("证据不足", item["degree"])
             self.assertIsNone(item["signal_percent"])
             self.assertIsNone(item["official_score"])
 
@@ -174,6 +174,7 @@ class PolicyChecksTests(unittest.TestCase):
                           "original_chars": len(BODY), "checked_chars": len(BODY), "text_truncated": False}]}
         item = row(assess_policy(posts, web_check=web), "original_contribution")
         self.assertEqual("no_detected_signal", item["status"])
+        self.assertEqual("未发现风险线索", item["degree"])
         self.assertEqual(1, item["assessed_count"])
         self.assertEqual(0, item["unknown_count"])
 
@@ -224,8 +225,8 @@ class PolicyChecksTests(unittest.TestCase):
         combined = combined_evidence({"total": 20, "counts": {}}, policy, web, posts)
         self.assertEqual("needs_review", combined["status"])
         self.assertEqual((1, 0, 19), (combined["body_matched_posts"], combined["snippet_matched_posts"], combined["unknown_own_posts"]))
-        self.assertIsNone(combined["official_probability"])
-        self.assertFalse(combined["probability_recalculated"])
+        self.assertNotIn("official_probability", combined)
+        self.assertNotIn("probability_recalculated", combined)
         self.assertIn("手动勾选的 10 条", combined["conclusion"])
         self.assertNotIn("分散抽取", combined["conclusion"])
 

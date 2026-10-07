@@ -18,6 +18,7 @@ import browser_api
 from engine import analyze
 from importers import normalize_project
 from reports import html_report, markdown_report
+from compliance import DEFAULT_WEIGHTS, unknown_content_review
 
 TEXT = "我在同一台设备上连续测试了三种发布方式，记录每次加载延迟和失败原因。结果显示完整来源说明减少了后续核实时间，以下是测量过程与具体结论。"
 
@@ -69,6 +70,22 @@ class BrowserAdapterTests(unittest.TestCase):
             "matched_chars": 40, "post_excerpt": TEXT[:40], "source_excerpt": TEXT[:40],
             "published_at": "2026-10-01", "published_at_basis": "page_metadata", "temporal_relation": "earlier",
             "source_kind": "page_body", "page_status": "fetched", "source_text_truncated": False, **extra}
+
+    def review(self, original=80, topic=100):
+        review = unknown_content_review("completed")
+        review["model"] = "fixture-model"
+        for row, score in ((review["criteria"][0], original), (review["criteria"][2], topic)):
+            if score is not None:
+                row.update(score=score, verdict="concern" if score < 40 else "mixed" if score < 70 else "supported",
+                           rationale="正文提供具体测试观察与解释。", post_excerpt=TEXT[:30])
+                if row["id"] == "original_contribution":
+                    row.update(source_url="https://example.com/reference", source_excerpt="用于分析比较的公开原始资料正文。")
+        return review
+
+    def semantic_report(self, pid, original=80, topic=100):
+        return self.report(pid, content_review=self.review(original, topic), sources_checked=1,
+            source_checks=[{"url": "https://example.com/reference", "page_status": "fetched", "source_kind": "page_body",
+                            "source_excerpt": "用于分析比较的公开原始资料正文。"}])
 
     def test_health_contains_version_but_no_local_token(self):
         response = request("/api/health")
@@ -149,19 +166,169 @@ class BrowserAdapterTests(unittest.TestCase):
         finished = json.loads(browser_api.finish_archive_json('{"hashes":[]}'))
         self.assertTrue(finished["ok"])
         self.assertEqual(1, finished["result"]["summary"]["total"])
-        self.assertIsNone(finished["result"]["summary"]["official_probability"])
-        summary = finished["result"]["summary"]
-        self.assertIsInstance(summary["estimated_probability"], int)
-        self.assertLessEqual(summary["probability_range"]["low"], summary["estimated_probability"])
-        self.assertGreaterEqual(summary["probability_range"]["high"], summary["estimated_probability"])
-        self.assertFalse(summary["probability_model"]["calibrated"])
-        self.assertEqual(summary["estimated_probability"], sum(factor["impact_points"] for factor in finished["result"]["probability_factors"]))
+        compliance = finished["result"]["summary"]["compliance"]
+        self.assertIsNone(compliance["score"])
+        self.assertEqual(0, compliance["coverage_percent"])
+        self.assertEqual(1, compliance["evidence_scope"]["scope_count"])
+        self.assertNotIn("estimated_probability", finished["result"]["summary"])
         self.assertIsNone(browser_api._prepared_archive)
         self.assertIsNotNone(browser_api._retained_archive)
         self.assertNotIn("posts", finished["result"])
         self.assertEqual("not_started", finished["result"]["web_check"]["status"])
         self.assertFalse(json.loads(browser_api.finish_archive_json('{}'))["ok"])
         self.assertIsNone(browser_api._retained_archive)
+
+    def test_semantic_score_retains_source_provenance_even_without_text_matches(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        self.assertTrue(plan["posts"][0]["text_complete"])
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.semantic_report("123456789")})
+        self.assertTrue(response["ok"], response)
+        result = response["result"]
+        compliance = result["summary"]["compliance"]
+        self.assertEqual((83.33, 6, 5, 94), (compliance["score"], compliance["coverage_percent"], compliance["supported_percent"], compliance["unknown_weight"]))
+        self.assertEqual({"low": 5, "high": 99}, compliance["evidence_range"])
+        self.assertEqual((1, 9, 10), tuple(compliance["criteria"][0][key] for key in ("evaluated_count", "unknown_count", "denominator")))
+        self.assertEqual([], result["web_check"]["posts"][0]["matches"])
+        self.assertEqual("https://example.com/reference", result["web_check"]["posts"][0]["source_checks"][0]["url"])
+        self.assertEqual(compliance, result["policy_checks"]["compliance"])
+        self.assertEqual(result, json.loads(json.dumps(result, allow_nan=False)))
+
+    def test_blocked_source_without_url_does_not_discard_valid_semantic_body_evidence(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        report = self.semantic_report("123456789")
+        report["posts"][0]["source_checks"].append({"page_status": "source_blocked", "source_kind": None,
+                                                   "source_text_truncated": None, "score": None, "matched_chars": 0})
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(1, len(response["result"]["web_check"]["posts"][0]["source_checks"]))
+        self.assertEqual(83.33, response["result"]["summary"]["compliance"]["score"])
+
+    def test_actual_backend_contract_crosses_worker_without_live_network(self):
+        from content_review import ContentReviewer
+        from webcheck import HttpResult, SearchCandidate, WebChecker, WebCheckError
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        rows = self.review()["criteria"]
+        source_url = "https://example.com/reference"
+        source_text = "用于分析比较的公开原始资料正文。这里列明基础观察条件、原始实验步骤、适用范围与已知局限，以便对照作者新增的实验结论。"
+        model_calls = []
+        class Provider:
+            name, ready = "fixture", True
+            def search(self, _query):
+                return [SearchCandidate(source_url), SearchCandidate("https://example.com/blocked")]
+        class SourceTransport:
+            def request(self, url, **_options):
+                if url.endswith("/blocked"):
+                    raise WebCheckError("source_dns_failed")
+                return HttpResult(url, 200, "text/plain", source_text.encode())
+        class ModelTransport:
+            def request(self, url, method="GET", headers=None, body=None, **options):
+                model_calls.append({"method": method, "body": body, **options})
+                return HttpResult(url, 200, "application/json", json.dumps({"choices": [{"finish_reason": "stop",
+                    "message": {"content": json.dumps({"criteria": rows}, ensure_ascii=False)}}]}, ensure_ascii=False).encode())
+        checker = WebChecker(Provider(), SourceTransport(), ContentReviewer("SYNTHETIC_MODEL_KEY", "https://model.example/v1", "fixture-model", transport=ModelTransport()))
+        payload = [{key: plan["posts"][0][key] for key in ("id", "text", "url", "created_at", "text_complete")}]
+        report = checker.check(payload)
+        self.assertEqual(1, len(model_calls))
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(83.33, response["result"]["summary"]["compliance"]["score"])
+        cited = response["result"]["web_check"]["posts"][0]["source_checks"][0]
+        self.assertEqual((source_url, "fetched", "page_body", rows[0]["source_excerpt"]),
+                         tuple(cited[key] for key in ("url", "page_status", "source_kind", "source_excerpt")))
+        self.assertNotIn("SYNTHETIC_MODEL_KEY", json.dumps(response))
+        # The same real backend path with an unconfigured model remains unknown.
+        report = WebChecker(Provider(), SourceTransport()).check(payload)
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+        self.assertTrue(response["ok"], response)
+        self.assertIsNone(response["result"]["summary"]["compliance"]["score"])
+        self.assertEqual(0, response["result"]["summary"]["compliance"]["coverage_percent"])
+
+    def test_invalid_semantic_batch_is_atomic_for_scores_verdicts_and_references(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        base = self.semantic_report("123456789")
+        bad_reports = []
+        for score in (True, -1, 101, float("nan"), float("inf")):
+            candidate = copy.deepcopy(base); candidate["posts"][0]["content_review"]["criteria"][0]["score"] = score; bad_reports.append(candidate)
+        changes = [("verdict", "mixed"), ("post_excerpt", "不在实际发送正文中的引用"), ("source_excerpt", "没有读取的来源引用"),
+                   ("source_url", "https://example.com/other"), ("source_url", "http://127.0.0.1/private"), ("rationale", "")]
+        for field, value in changes:
+            candidate = copy.deepcopy(base); candidate["posts"][0]["content_review"]["criteria"][0][field] = value; bad_reports.append(candidate)
+        for identifier in ("automation", "intellectual_property"):
+            candidate = copy.deepcopy(base)
+            row = next(row for row in candidate["posts"][0]["content_review"]["criteria"] if row["id"] == identifier)
+            row.update(score=100, verdict="supported"); bad_reports.append(candidate)
+        candidate = copy.deepcopy(base); candidate["posts"][0]["content_review"]["criteria"][1]["id"] = "original_contribution"; bad_reports.append(candidate)
+        candidate = copy.deepcopy(base); candidate["posts"][0]["source_checks"][0]["source_kind"] = "search_snippet"; bad_reports.append(candidate)
+        candidate = copy.deepcopy(base); candidate["posts"][0]["content_review"]["status"] = "failed"; bad_reports.append(candidate)
+        before = copy.deepcopy(browser_api._retained_archive)
+        for report in bad_reports:
+            report["posts"].insert(0, self.semantic_report("123456790")["posts"][0])
+            with self.subTest(report=report):
+                response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
+                self.assertFalse(response["ok"], response)
+                self.assertEqual(before, browser_api._retained_archive)
+
+    def test_truncated_and_underchecked_text_cannot_receive_semantic_scores(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT * 100}])
+        plan = self.plan()["result"]
+        self.assertFalse(plan["posts"][0]["text_complete"])
+        before = copy.deepcopy(browser_api._retained_archive)
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.semantic_report("123456789", original=None)})
+        self.assertFalse(response["ok"], response)
+        self.assertEqual(before, browser_api._retained_archive)
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        report = self.semantic_report("123456789"); report["posts"][0]["checked_chars"] = len(TEXT)-1
+        self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
+
+    def test_media_originality_stays_unknown_but_complete_text_topic_can_be_assessed(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT, "extended_entities": {"media": [
+            {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/picture.jpg"}]}}])
+        plan = self.plan()["result"]
+        response = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.semantic_report("123456789")})
+        self.assertTrue(response["ok"], response)
+        compliance = response["result"]["summary"]["compliance"]
+        self.assertIsNone(compliance["score"])
+        self.assertIsNone(compliance["criteria"][0]["score"])
+        self.assertEqual(100, compliance["criteria"][2]["score"])
+        self.assertIn({"code": "original_media_unchecked"}, response["result"]["web_check"]["posts"][0]["content_review"]["issues"])
+
+    def test_incremental_batches_keep_pending_and_abandoned_posts_unknown(self):
+        self.web_archive([{"id_str": str(123456789+i), "full_text": TEXT} for i in range(3)])
+        plan = self.plan()["result"]
+        session = plan["session_id"]
+        first = request("/api/webcheck/apply", {"session_id": session, "report": self.semantic_report("123456789", 0, 0)})["result"]
+        self.assertEqual((0, 6), (first["summary"]["compliance"]["score"], first["summary"]["compliance"]["coverage_percent"]))
+        abandoned = request("/api/webcheck/abandon", {"session_id": session, "ids": ["123456790"], "reason": "cancelled"})["result"]
+        self.assertEqual(first["summary"]["compliance"]["score"], abandoned["summary"]["compliance"]["score"])
+        later = request("/api/webcheck/apply", {"session_id": session, "report": self.semantic_report("123456791", 100, 100)})["result"]
+        self.assertEqual((50, 12, 8), (later["summary"]["compliance"]["score"], later["summary"]["compliance"]["coverage_percent"], later["summary"]["compliance"]["criteria"][0]["unknown_count"]))
+        self.assertEqual("failed", next(post for post in later["web_check"]["posts"] if post["id"] == "123456790")["content_review"]["status"])
+
+    def test_weights_recalculate_from_same_evidence_without_analysis_or_selection_change(self):
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        plan = self.plan()["result"]
+        base = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.semantic_report("123456789", 0, 100)})["result"]
+        weights = {"original_contribution": 10, "automation": 20, "monetization_focus": 50, "intellectual_property": 20}
+        with patch.object(browser_api, "analyze", side_effect=AssertionError("no reparse or analysis")):
+            response = request("/api/compliance/weights", {"session_id": plan["session_id"], "weights": weights})
+        self.assertTrue(response["ok"], response)
+        result = response["result"]
+        self.assertEqual(83.33, result["summary"]["compliance"]["score"])
+        self.assertEqual(base["web_check"], result["web_check"])
+        self.assertEqual(base["summary"]["compliance"]["evidence_scope"], result["summary"]["compliance"]["evidence_scope"])
+        self.assertEqual(weights, request("/api/webcheck/result")["result"]["summary"]["compliance"]["weights"])
+        before = copy.deepcopy(browser_api._retained_archive)
+        for invalid in ({**weights, "automation": 21}, {**weights, "automation": True}, {**weights, "original_contribution": float("nan")},
+                        {**weights, "extra": 0}, {"original_contribution": 100}, None):
+            self.assertFalse(request("/api/compliance/weights", {"weights": invalid})["ok"])
+            self.assertEqual(before, browser_api._retained_archive)
+        self.assertFalse(request("/api/compliance/weights", {"session_id": "stale", "weights": weights})["ok"])
+        self.assertEqual(before, browser_api._retained_archive)
 
     def test_archive_input_failure_never_leaves_previous_material(self):
         browser_api._prepared_archive = {"old": "old private archive"}
@@ -187,8 +354,9 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual("123456705", post["id"])
         self.assertEqual(100, len(post["text"]))
         self.assertTrue(post["text_truncated"])
+        self.assertFalse(post["text_complete"])
         self.assertEqual(len(TEXT) * 100, post["original_chars"])
-        self.assertEqual({"id", "text", "url", "created_at", "original_chars", "text_truncated"}, set(post))
+        self.assertEqual({"id", "text", "url", "created_at", "original_chars", "text_truncated", "text_complete"}, set(post))
         self.assertNotIn("PRIVATE", json.dumps(first))
         for invalid in ({"offset": -1}, {"offset": 11}, {"limit": 11}, {"limit": True}, {"max_chars": 5001}, {"max_chars": 0}):
             with self.subTest(invalid=invalid):
@@ -200,9 +368,9 @@ class BrowserAdapterTests(unittest.TestCase):
         with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun full archive")):
             matched = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][0]["id"], "matched", [self.match()])})
         self.assertTrue(matched["ok"], matched)
-        self.assertEqual({key: value for key, value in base["summary"].items() if key != "combined_evidence"},
-                         {key: value for key, value in matched["result"]["summary"].items() if key != "combined_evidence"})
-        self.assertIsNone(matched["result"]["summary"]["official_probability"])
+        self.assertEqual({key: value for key, value in base["summary"].items() if key not in {"combined_evidence", "compliance"}},
+                         {key: value for key, value in matched["result"]["summary"].items() if key not in {"combined_evidence", "compliance"}})
+        self.assertIsNone(matched["result"]["summary"]["compliance"]["score"])
         self.assertIn("policy_checks", matched["result"])
         self.assertFalse(any("未做全网查重" in text for text in matched["result"]["limitations"]))
         failed_report = self.report(plan["posts"][1]["id"], "failed", issues=[{"code": "provider_unavailable"}], checked_chars=0)
@@ -299,7 +467,7 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertIn("手动勾选的 10 条", result["summary"]["combined_evidence"]["conclusion"])
         self.assertEqual({}, browser_api._retained_archive["web_posts"])
 
-    def test_completed_manual_ten_preserves_unselected_unknowns_and_offline_probability(self):
+    def test_completed_manual_ten_preserves_unselected_unknowns_and_unassessed_compliance(self):
         base = self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
         plan = self.plan()["result"]
         report = self.report(plan["posts"][0]["id"], "matched", [self.match()])
@@ -319,12 +487,14 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(1, combined["body_matched_posts"])
         self.assertEqual(21, combined["unknown_own_posts"])
         self.assertIn("不能推广", combined["conclusion"])
-        self.assertFalse(combined["probability_recalculated"])
-        self.assertEqual(base["summary"]["estimated_probability"], result["summary"]["estimated_probability"])
-        self.assertEqual(base["summary"]["probability_range"], result["summary"]["probability_range"])
+        compliance = result["summary"]["compliance"]
+        self.assertIsNone(compliance["score"])
+        self.assertEqual(10, compliance["evidence_scope"]["scope_count"])
+        self.assertEqual("not_estimated", compliance["evidence_scope"]["projection"])
+        self.assertEqual(0, compliance["coverage_percent"])
         original = next(item for item in result["policy_checks"]["requirements"] if item["id"] == "original_contribution")
         self.assertEqual((1, 31, 3.2), (original["signal_count"], original["denominator"], original["signal_percent"]))
-        self.assertIsNone(result["summary"]["official_probability"])
+        self.assertIsNone(result["summary"]["compliance"]["score"])
         self.assertIn("综合证据结论", markdown_report({}, result))
         self.assertIn("公开来源证据合并", html_report({}, result))
 

@@ -169,7 +169,7 @@ test('worker loads only same-origin trusted modules and dispatches serial JSON s
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(initialScript, 'https://example.test/project/vendor/pyodide/pyodide.js');
-  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['archive_adapter.py', 'browser_api.py', 'engine.py', 'importers.py', 'policy_checks.py', 'reports.py']);
+  assert.deepEqual(fetched.map(url => new URL(url).pathname.split('/').at(-1)).sort(), ['archive_adapter.py', 'browser_api.py', 'compliance.py', 'engine.py', 'importers.py', 'policy_checks.py', 'reports.py']);
   assert.equal(sent.at(-1).type, 'ready');
   self.onmessage({data: {type: 'request', id: 1, request_json: '{"path":"/api/analyze","data":{}}'}});
   self.onmessage({data: {type: 'request', id: 2, request_json: '{"path":"/api/report","data":{}}'}});

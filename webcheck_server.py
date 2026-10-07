@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from webcheck import (MAX_CANDIDATES, MAX_CHECKED_TEXT, MAX_INPUT_TEXT, MAX_POSTS,
                       MAX_QUERIES, MIN_TEXT, SearchProvider, WebChecker, clean,
                       search_queries, validate_posts)
+from content_review import ContentReviewer
 
 MAX_REQUEST = 700000
 DEFAULT_QUERY_BUDGET = 100
@@ -90,7 +91,8 @@ class WebCheckServer(ThreadingHTTPServer):
     def status(self):
         provider = self.checker.provider
         return {"ok": True, "schema_version": 1, "ready": provider.ready, "provider": provider.name,
-                "requires_access_token": bool(self.access_token), "limits": {"max_posts": MAX_POSTS,
+                "requires_access_token": bool(self.access_token), "content_review": self.checker.content_reviewer.status(),
+                "limits": {"max_posts": MAX_POSTS,
                 "min_text": MIN_TEXT, "max_input_chars": MAX_INPUT_TEXT, "max_checked_chars": MAX_CHECKED_TEXT,
                 "max_queries_per_post": MAX_QUERIES, "max_candidates_per_post": MAX_CANDIDATES,
                 "hourly_query_budget": self.budget.limit, "hourly_queries_remaining": self.budget.remaining(), "max_concurrent_batches": 2}}
@@ -218,7 +220,8 @@ def make_server(host="127.0.0.1", port=8787, env=None):
     budget = int(settings.get("WEBCHECK_HOURLY_QUERY_BUDGET", str(DEFAULT_QUERY_BUDGET)))
     if not 1 <= budget <= 10000:
         raise ValueError("小时预算必须是 1–10,000 次查询。")
-    return WebCheckServer((host, port), WebChecker(provider), origins, hosts, settings.get("WEBCHECK_ACCESS_TOKEN", ""), budget)
+    reviewer = ContentReviewer.from_env(settings)
+    return WebCheckServer((host, port), WebChecker(provider, content_reviewer=reviewer), origins, hosts, settings.get("WEBCHECK_ACCESS_TOKEN", ""), budget)
 
 
 def main():

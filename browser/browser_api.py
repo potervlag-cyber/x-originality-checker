@@ -10,6 +10,7 @@ import binascii
 import copy
 import ipaddress
 import json
+import math
 import re
 from urllib.parse import urlsplit
 import uuid
@@ -20,6 +21,7 @@ from importers import MAX_FILE_BYTES, import_data, normalize_project
 from reports import html_report, markdown_report
 from archive_adapter import prepare_archive, finish_archive
 from policy_checks import assess_policy, combined_evidence
+from compliance import CRITERION_IDS, DEFAULT_WEIGHTS, assess_compliance, unknown_content_review, validate_weights
 
 MAX_REQUEST_BYTES = 45 * 1024 * 1024
 _prepared_archive = None
@@ -107,7 +109,7 @@ def _web_check(state):
                             "文字重合不能确认作者归属、授权、自转载或引用是否恰当，需人工复核。",
                             "联网仅检查在本机归档中手动勾选的 10 条本人主帖正文（包含引用帖，不含回复和普通转帖），不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
                             "批次发出后取消、超时或响应无效时，上游是否执行及费用未知；返回的零成功次数只表示未取得证据，不表示没有检索消耗。",
-                            "联网检查不重算离线参考概率，也不调用 X 官方审核或检查媒体来源。"]}
+                            "内容符合率仅汇总本次有证据的模型判断，不调用 X 官方审核；媒体原创贡献、创作过程与权利授权保留未知。"]}
 
 
 def _current_archive():
@@ -239,14 +241,92 @@ def _web_plan(data):
             continue
         text = post["text"][:maximum]
         plan = {"id": post["id"], "text": text, "url": post["url"], "created_at": post["created_at"],
-                "original_chars": len(post["text"]), "text_truncated": len(text) < len(post["text"])}
-        state["planned"][post["id"]] = {"original_chars": plan["original_chars"], "text_truncated": plan["text_truncated"], "checked_chars": len(text)}
+                "original_chars": len(post["text"]), "text_truncated": len(text) < len(post["text"]),
+                "text_complete": post["text_complete"] is True and len(text) == len(post["text"])}
+        state["planned"][post["id"]] = {"original_chars": plan["original_chars"], "text_truncated": plan["text_truncated"], "checked_chars": len(text), "text_complete": plan["text_complete"]}
         posts.append(plan)
     next_offset = cursor
     return {"session_id": state["session_id"], "total_eligible": len(state["eligible"]),
             "selected_total": len(state["selected"]), "mode": state["selection_mode"], "sample_method": state["sample_method"],
             "offset": offset, "next_offset": next_offset, "remaining": len(state["selected"]) - next_offset,
             "posts": posts, "done": next_offset >= len(state["selected"])}
+
+
+def _validated_content_review(raw, source_checks, post, plan, checked_chars, text_truncated):
+    """Accept only the fixed semantic contract and authenticated source references."""
+    if raw is None:
+        return unknown_content_review(), []  # Older search services carry no content evidence.
+    if (not isinstance(raw, dict) or isinstance(raw.get("schema_version"), bool)
+            or raw.get("schema_version") != 1 or raw.get("status") not in {"completed", "not_configured", "failed"}):
+        raise ValueError("内容评估版本或状态格式异常。")
+    status = raw["status"]
+    model = _text(raw.get("model"), "内容评估模型", 200)
+    criteria = raw.get("criteria")
+    issues = raw.get("issues", [])
+    if (not isinstance(criteria, list) or len(criteria) != 4 or not isinstance(issues, list)
+            or len(issues) > 20 or not all(isinstance(issue, dict) for issue in issues)):
+        raise ValueError("内容评估需要四项不同的固定要求和有界提示。")
+    if not isinstance(source_checks, list) or len(source_checks) > 5:
+        raise ValueError("内容评估来源核查列表格式异常。")
+    sources = []
+    for source in source_checks:
+        if not isinstance(source, dict):
+            raise ValueError("内容评估来源记录格式异常。")
+        page_status = _text(source.get("page_status"), "来源网页状态", 100)
+        source_kind = _text(source.get("source_kind"), "来源正文类型", 100)
+        source_excerpt = _text(source.get("source_excerpt"), "内容来源引用", 600)
+        # Blocked/DNS-failed sources intentionally omit URLs; only fetched bodies
+        # may authenticate semantic citations or appear in retained provenance.
+        if page_status == "fetched" and source_kind == "page_body":
+            sources.append({"url": _source_url(source.get("url")), "page_status": page_status,
+                            "source_kind": source_kind, "source_excerpt": source_excerpt})
+    checked_text = post["text"][:plan["checked_chars"]][:checked_chars]
+    complete = (post.get("text_complete") is True and plan.get("text_complete") is True
+                and not text_truncated and checked_chars == len(post["text"]))
+    validated, seen, referenced = [], set(), []
+    for criterion in criteria:
+        if not isinstance(criterion, dict) or criterion.get("id") not in CRITERION_IDS or criterion["id"] in seen:
+            raise ValueError("内容评估要求编号重复或不受支持。")
+        identifier = criterion["id"]
+        seen.add(identifier)
+        score, verdict = criterion.get("score"), criterion.get("verdict")
+        if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))
+                or not math.isfinite(score) or not 0 <= score <= 100):
+            raise ValueError("内容评估分数应为 0–100 的有限数字或未知。")
+        expected = "unknown" if score is None else "concern" if score < 40 else "mixed" if score < 70 else "supported"
+        if verdict != expected or (status != "completed" or identifier in {"automation", "intellectual_property"}) and score is not None:
+            raise ValueError("内容评估分数与结论、状态或可验证范围不一致。")
+        rationale = _text(criterion.get("rationale"), "内容评估理由", 1000)
+        post_excerpt = _text(criterion.get("post_excerpt"), "内容帖子引用", 600)
+        source_excerpt = _text(criterion.get("source_excerpt"), "内容来源引用", 600)
+        source_url = _text(criterion.get("source_url"), "内容来源链接", 4096)
+        if score is None:
+            if post_excerpt or source_excerpt or source_url:
+                raise ValueError("未知内容评估不能带有评分引用。")
+        else:
+            if not complete:
+                raise ValueError("未取得完整帖子正文，不能进行内容符合率评分。")
+            if not model.strip() or not rationale.strip() or not post_excerpt.strip() or post_excerpt not in checked_text:
+                raise ValueError("内容评分需要模型、理由和实际核查正文中的逐字引用。")
+            if identifier == "original_contribution":
+                source_url = _source_url(source_url)
+                source = next((entry for entry in sources if entry["url"] == source_url
+                    and entry["page_status"] == "fetched" and entry["source_kind"] == "page_body"
+                    and entry["source_excerpt"] == source_excerpt), None)
+                if not source_excerpt.strip() or source is None:
+                    raise ValueError("原创贡献评分需要已读取来源正文的可核对引用。")
+                if post.get("media"):
+                    score, verdict, post_excerpt, source_url, source_excerpt = None, "unknown", "", "", ""
+                    rationale = "帖子包含尚未核验的媒体；正文比较不足以评估整体原创贡献。"
+                    issues = [*issues, {"code": "original_media_unchecked"}]
+                elif source not in referenced:
+                    referenced.append(source)
+            elif source_url or source_excerpt:
+                raise ValueError("变现主题评分仅引用帖子正文，不应引用外部来源。")
+        validated.append({"id": identifier, "score": score, "verdict": verdict, "rationale": rationale,
+            "post_excerpt": post_excerpt, "source_url": source_url, "source_excerpt": source_excerpt})
+    return {"schema_version": 1, "status": status, "model": model, "criteria": validated,
+            "issues": [{"code": _text(issue.get("code"), "内容评估提示代码", 100)} for issue in issues]}, referenced
 
 
 def _validated_report(report, state):
@@ -317,6 +397,9 @@ def _validated_report(report, state):
         text_truncated = state["planned"][post_id]["text_truncated"] or source_truncated
         if status in {"matched", "no_match"} and (text_truncated or checked_chars < state["planned"][post_id]["original_chars"]):
             status = "partial"
+        post = next(post for post in state["selected"] if post["id"] == post_id)
+        content_review, content_sources = _validated_content_review(raw.get("content_review"), raw.get("source_checks", []),
+            post, state["planned"][post_id], checked_chars, text_truncated)
         posts.append({"id": post_id, "status": status,
             "query_count": query_count, "successful_queries": successful_queries,
             "candidates_found": _integer(raw.get("candidates_found", 0), "候选来源数", maximum=1000),
@@ -326,7 +409,8 @@ def _validated_report(report, state):
             "issues": [{"code": _text(issue.get("code"), "检查提示代码", 100)} for issue in issues],
             "original_chars": state["planned"][post_id]["original_chars"], "checked_chars": checked_chars,
             "text_truncated": text_truncated,
-            "max_similarity": maximum_similarity, "execution_status": "reported"})
+            "max_similarity": maximum_similarity, "execution_status": "reported",
+            "content_review": content_review, "source_checks": content_sources})
     return posts, provider, checked_at
 
 
@@ -335,21 +419,23 @@ def _composed_result(state, next_state):
     result = copy.deepcopy(state["base_result"])
     result["web_check"] = web_check
     result["coverage"]["web_check"] = web_check["coverage"]
+    result["summary"]["compliance"] = assess_compliance(state["posts"], web_check,
+        selected_ids=[post["id"] for post in state["selected"]] if state["selection_locked"] else None,
+        weights=next_state["compliance_weights"])
     result["policy_checks"] = assess_policy(state["posts"], state["assessed_posts"], web_check)
+    result["policy_checks"]["compliance"] = result["summary"]["compliance"]
     result["summary"]["combined_evidence"] = combined_evidence(result["summary"], result["policy_checks"], web_check, state["posts"])
     result["limitations"] = [item for item in result.get("limitations", []) if "未做全网查重" not in item]
     result["limitations"].extend(web_check["limitations"])
     for reason in result.get("reasons", []):
         if reason.get("code") == "no_internal_match":
             reason["detail"] = "已提供的归档正文中没有发现明显账号内重复信号；公开网络检查的覆盖与证据见联网结果，仍不能据此证明原创。"
-    for factor in result.get("probability_factors", []):
-        if factor.get("code") == "external_sources_unknown":
-            factor["detail"] = "上方概率保留联网前的归档规则估计；本次公开来源检查不重算概率。全网覆盖和作者归属仍未知，联网证据见下方结果。"
     for example in result.get("examples", []):
         for reason in example.get("reasons", []):
             if reason.get("code") == "no_supplied_text_match":
                 reason["message"] = "归档内比较未发现明显重复；本条是否联网及来源证据见联网报告，未发现匹配不能证明原创。"
-    state.update(web_posts=next_state["web_posts"], provider=next_state["provider"], checked_at=next_state["checked_at"])
+    state.update(web_posts=next_state["web_posts"], provider=next_state["provider"], checked_at=next_state["checked_at"],
+                 compliance_weights=next_state["compliance_weights"])
     return result
 
 
@@ -384,7 +470,8 @@ def _web_abandon(data):
             "matches": [], "matches_total": 0, "same_post": [],
             "issues": [{"code": "batch_response_unknown"}, {"code": reason}],
             "original_chars": plan["original_chars"], "checked_chars": 0,
-            "text_truncated": plan["text_truncated"], "max_similarity": None}
+            "text_truncated": plan["text_truncated"], "max_similarity": None,
+            "content_review": unknown_content_review("failed"), "source_checks": []}
     next_state = {**state, "web_posts": {**state["web_posts"], **updates},
                   "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")}
     return _composed_result(state, next_state)
@@ -394,6 +481,15 @@ def _web_result(data):
     state = _current_archive()
     _check_session(data, state)
     return _composed_result(state, {**state, "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")})
+
+
+def _compliance_weights(data):
+    state = _current_archive()
+    _check_session(data, state)
+    weights = validate_weights(data.get("weights"))
+    next_state = {**state, "compliance_weights": weights,
+                  "provider": state.get("provider", ""), "checked_at": state.get("checked_at", "")}
+    return _composed_result(state, next_state)
 
 
 def prepare_archive_json(payload_json):
@@ -435,8 +531,9 @@ def finish_archive_json(media_json):
             "base_result": result,
             "disabled_reasons": disabled_reasons,
             "eligible": [p for p in posts if not disabled_reasons[p["id"]]],
-            "planned": {}, "web_posts": {}}
+            "planned": {}, "web_posts": {}, "compliance_weights": dict(DEFAULT_WEIGHTS)}
         _retained_archive.update(selected=[], selection_mode="not_selected", sample_method="not_selected", selection_locked=False)
+        result["policy_checks"]["compliance"] = result["summary"]["compliance"]
         result["web_check"] = _web_check(_retained_archive)
         result["summary"]["combined_evidence"] = combined_evidence(result["summary"], result["policy_checks"], result["web_check"], posts)
         response = {"ok": True, "result": result}
@@ -480,6 +577,8 @@ def _dispatch(path, data):
         return _web_abandon(data)
     if path == "/api/webcheck/result":
         return _web_result(data)
+    if path == "/api/compliance/weights":
+        return _compliance_weights(data)
     if path == "/api/import":
         encoded = data.get("content_base64", "")
         if not isinstance(encoded, str) or len(encoded) > MAX_FILE_BYTES * 4 // 3 + 8:

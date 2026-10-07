@@ -478,8 +478,8 @@ def validate_posts(posts):
         raise ValueError("每次联网检查需要 1–10 条帖子。")
     result, ids = [], set()
     for post in posts:
-        if not isinstance(post, dict) or set(post) - {"id", "text", "url", "created_at"}:
-            raise ValueError("联网接口仅接受 id、text、url、created_at 字段。")
+        if not isinstance(post, dict) or set(post) - {"id", "text", "url", "created_at", "text_complete"}:
+            raise ValueError("联网接口仅接受 id、text、url、created_at 与 text_complete 字段。")
         if not isinstance(post.get("id"), str) or not post["id"] or len(post["id"]) > 200 or post["id"] in ids:
             raise ValueError("帖子 id 必须唯一，且不超过 200 字符。")
         if not isinstance(post.get("text"), str) or len(post["text"]) > MAX_INPUT_TEXT:
@@ -487,33 +487,56 @@ def validate_posts(posts):
         for key, limit in (("url", 2048), ("created_at", 100)):
             if not isinstance(post.get(key, ""), str) or len(post.get(key, "")) > limit:
                 raise ValueError("帖子链接或日期格式无效。")
+        if "text_complete" in post and not isinstance(post["text_complete"], bool):
+            raise ValueError("正文完整标记必须为布尔值。")
         ids.add(post["id"])
-        result.append({key: post.get(key, "") for key in ("id", "text", "url", "created_at")})
+        result.append({**{key: post.get(key, "") for key in ("id", "text", "url", "created_at")},
+                       "text_complete": post.get("text_complete", False)})
     return result
 
 
 class WebChecker:
-    def __init__(self, provider, transport=None):
+    def __init__(self, provider, transport=None, content_reviewer=None):
         self.provider = provider
         self.transport = transport or SafeHTTPTransport()
+        from content_review import ContentReviewer
+        self.content_reviewer = content_reviewer or ContentReviewer()
 
     def check(self, posts):
         posts = validate_posts(posts)
         checked_at = dt.datetime.now(dt.timezone.utc).isoformat()
-        results = [self._post(post) for post in posts]
+        results = []
+        for post in posts:
+            result = self._post(post)
+            sources = result.pop("_review_sources")
+            if result["status"] in {"failed", "skipped"} or result["checked_chars"] < len(post["text"]):
+                # A failed/shortened search window cannot authenticate a whole-
+                # post model score in the strict browser report contract.
+                result["content_review"] = self.content_reviewer.unavailable_search()
+            else:
+                result["content_review"] = self.content_reviewer.review(post, sources, truncated=result["text_truncated"])
+            # Authenticate a cited nonmatching source without returning its full body.
+            for criterion in result["content_review"]["criteria"]:
+                if criterion["source_url"] and criterion["source_excerpt"]:
+                    for checked in result["source_checks"]:
+                        if checked.get("url") == criterion["source_url"] and checked.get("page_status") == "fetched" and checked.get("source_kind") == "page_body":
+                            checked["source_excerpt"] = criterion["source_excerpt"]
+            results.append(result)
         searched = sum(p["successful_queries"] > 0 for p in results)
         return {"schema_version": 1, "provider": self.provider.name, "checked_at": checked_at,
                 "coverage": {"requested": len(posts), "searched": searched, "compared": sum(p["sources_checked"] > 0 for p in results),
                              "failed": sum(p["status"] == "failed" for p in results), "partial": sum(p["status"] == "partial" for p in results),
                              "skipped": sum(p["status"] == "skipped" for p in results), "search_complete": all(p["successful_queries"] == p["query_count"] and p["query_count"] > 0 for p in results),
                              "web_coverage": "unknown", "checked_chars": sum(p["checked_chars"] for p in results), "original_chars": sum(p["original_chars"] for p in results)},
-                "posts": results, "limitations": LIMITATIONS}
+                "posts": results, "limitations": [*LIMITATIONS,
+                    "可选模型评分仅评估已提供完整文字与有界实际来源正文，不代表官方认定；无来源、截断、模型未配置/失败及缺创作流程或许可的条款仍未知。"]}
 
     def _post(self, post):
         text = post["text"][:MAX_CHECKED_TEXT]
         result = {"id": post["id"], "status": "skipped", "query_count": 0, "successful_queries": 0,
                   "candidates_found": 0, "sources_checked": 0, "source_checks": [], "matches": [], "same_post": [], "issues": [],
-                  "checked_chars": len(text), "original_chars": len(post["text"]), "text_truncated": len(text) != len(post["text"]), "max_similarity": None}
+                  "checked_chars": len(text), "original_chars": len(post["text"]), "text_truncated": len(text) != len(post["text"]), "max_similarity": None,
+                  "_review_sources": []}
         if len(clean(text)) < MIN_TEXT:
             result["issues"].append({"code": "text_too_short"})
             result["checked_chars"] = 0
@@ -577,6 +600,7 @@ class WebChecker:
                 if len(clean(page["text"])) < MIN_TEXT:
                     raise WebCheckError("source_no_comparable_text")
                 result["sources_checked"] += 1
+                result["_review_sources"].append({"url": response.url, "text": page["text"], "text_truncated": page["text_truncated"]})
                 if page["text_truncated"]:
                     result["issues"].append({"code": "source_text_truncated"})
                 matching = compare_text(text, page["text"])

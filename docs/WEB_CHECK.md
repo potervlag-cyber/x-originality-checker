@@ -18,7 +18,9 @@ GitHub Pages 只能发布静态网页，不能运行这个 Python 服务。本�
 
 服务地址、服务访问码和文字发送许可都在弹窗中设置；连接项可在折叠的高级设置中调整。连接信息与许可在确认时固定，访问码不会进入下载或公开配置。当前归档的 10 条选择在确认时按帖子 ID 固定；中断后可调整连接并继续尚未发送的范围，更换 ZIP 则清除旧选择与发送许可。
 
-报告首部的 `summary.combined_evidence` 合并归档与实际联网证据，明确本地总数、已选择/检索数量、正文与摘要匹配、未选、未完成和未知数量。逐项规则继续使用全部非普通转帖记录作为分母，不能把手动指定 10 条的百分比外推至全部归档。所选 10 条也不代表全网覆盖。原归档信号参考概率保留，`official_probability` 仍为 `null`；相似来源不是抄袭结论。
+报告首部的 `summary.combined_evidence` 合并归档与实际联网证据，明确本地总数、已选择/检索数量、正文与摘要匹配、未选、未完成和未知数量。辅助风险面板使用全部非普通转帖记录作为分母；新的 `summary.compliance` 仅在已选 10 条范围按原创要求权重汇总有依据的内容评估，不外推至全部归档。旧通过概率与数量加分已移除；相似来源仍需人工复核。
+
+配置 [内容分析模型](CONTENT_REVIEW_CONFIG.md) 后，实际抓取的候选正文与完整帖子可供新增贡献语义对比，完整帖子亦可用于变现主题判断。内容模型必须给出逐字摘录和真实来源地址；无源文、截断、模型失败、未配置及未处理均保留未知。创作方式和知识产权缺少流程/许可材料时固定未知。默认权重50/20/10/20，可在结果中调整总和100且原创贡献大于0；调整只重汇总既有证据。综合范围和未知权重计算见 [规则与计算口径](POLICY_REFERENCE.md)。
 
 Worker 保存 `web_check.coverage.mode`、`selected_total`、`total_eligible`、`unselected_eligible`、`sample_method` 和所选范围的 `remaining`。手动选择使用 `mode: manual10`、`sample_method: manual_archive_selection`，本机计划通过 `ids` 固定 10 个不同的归档帖子 ID；未选择联网时使用 `not_selected`，所选数量和剩余数量均为零。`selection_complete` 表示所选记录均已有返回或未知状态，不表示网页完整读取或全网覆盖；`selection_search_complete` 要求这 10 条都有完整检索证据，`search_complete` 则仍要求全部可检索记录均有完整检索证据。10 条查询结束后仍保留未选数量和全网覆盖未知。
 
@@ -52,7 +54,7 @@ python webcheck_server.py --host 127.0.0.1 --port 8787
 
 `GET /api/webcheck/status` 返回 `ready`、`provider`、`requires_access_token` 和非敏感 `limits`。它不返回搜索 key、访问 token、帖子内容或上游响应正文。
 
-`POST /api/webcheck` 要求 JSON、明确的 `consent: true`。每条仅接受四个字段，不能提交整个项目对象：
+`POST /api/webcheck` 要求 JSON、明确的 `consent: true`。每条接受必要的四个帖子字段及可选的 `text_complete` 布尔值，不能提交整个项目对象。缺少完整性声明的旧客户端仍可搜索，但不会被当作完整内容语义评估；新客户端依据status能力协商，在支持的服务上传完整性标记：
 
 ```json
 {
@@ -61,7 +63,8 @@ python webcheck_server.py --host 127.0.0.1 --port 8787
     "id": "sample-1",
     "text": "选中的公开帖子正文",
     "url": "https://x.com/example/status/123456789",
-    "created_at": "2026-10-07T08:00:00+08:00"
+    "created_at": "2026-10-07T08:00:00+08:00",
+    "text_complete": true
   }]
 }
 ```
@@ -79,7 +82,7 @@ python webcheck_server.py --host 127.0.0.1 --port 8787
 
 每次查询最多返回五个候选；两次查询按结果排名交错选取并按 URL 去重，总共仍最多尝试五个来源。例如先选第一查询的第一项，再选第二查询的第一项，然后各自第二项；第一查询不能占满全部来源预算而排除第二查询。未选中的候选仍计入 `candidates_found`，候选超限保留 `partial` 状态。
 
-原始 API 响应中的 `source_checks` 最多五项，记录实际尝试的来源、标题、读取状态、正文或摘要类型、来源截断与已达到报告阈值的相似分数/字符数；无相似证据为 `score: null`，不代表原创。它不返回查询、正文或凭据。被安全校验阻断或 DNS 失败的来源只保留失败状态，不保留可点击 URL 或标题；原有 `issues` 继续记录失败代码。同一原帖重定向标记 `same_post`，不计外部重复。此字段用于服务验收诊断，当前浏览器结果与下载报告只保留原有匹配证据，不包含这份诊断列表。
+`source_checks` 最多五项，记录实际尝试的来源、标题、读取状态、正文或摘要类型和截断；无相似证据为 `score: null`。被阻断或 DNS 失败的来源不保留可点击 URL。同一原帖标记 `same_post`。内容模型引用实际抓取的来源时，相应项附有界 `source_excerpt`，由 Worker 核对来源身份和摘录一致性；下载报告保留用于内容评估的有界依据，不含完整抓取正文、查询或凭据。
 
 网络传输只允许 HTTP/HTTPS 默认端口；禁止 URL 凭据、私网与混合 DNS 答案。连接固定到已验证的公网 IP，HTTPS 使用原主机名进行证书验证；每次重定向重新核验，不能通过 DNS 重绑定访问内部系统。搜索 provider 不跟随重定向，避免 key 外传。抓取正文最大 2 MiB，提取后只比对前 100,000 字符，返回 `source_text_truncated`；有限候选、读超时、CORS、Host、访问 token、并发与小时预算共同限制资源消耗。服务不输出导入正文、搜索 query、凭据、上游错误正文或请求日志。
 
