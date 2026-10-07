@@ -247,6 +247,8 @@ def assess_policy(posts, assessed_posts=None, web_check=None):
         result["web_evidence_scope"]["projection"] = "not_estimated"
         if coverage.get("mode") == "sample10":
             result["requirements"][0]["interpretation"] += " 联网样本按归档顺序分散抽取，未将样本命中比例推广为全归档违规率。"
+        elif coverage.get("mode") == "manual10":
+            result["requirements"][0]["interpretation"] += " 联网仅检查手动链接指定的 10 条归档正文，未将指定帖子的命中比例推广为全归档违规率。"
     return result
 
 
@@ -289,7 +291,7 @@ def combined_evidence(summary, policy, web_check, posts=None):
     else:
         status, title = "no_detected_overlap", "已检查材料未发现明显重合线索"
     mode = coverage.get("mode", "all")
-    scope = f"分散抽取 {selected} 条" if mode == "sample10" else f"全部 {selected} 条可检索正文"
+    scope = f"手动指定的 {selected} 条" if mode == "manual10" else f"分散抽取 {selected} 条" if mode == "sample10" else f"全部 {selected} 条可检索正文"
     if local_only:
         availability = f"共有 {total} 条可联网检索正文，本次未联网。" if total else "当前没有可联网检索的完整正文，本次未联网。"
         conclusion = (f"归档本地分析覆盖 {summary.get('total', 0)} 条记录，其中 {local_review} 条需人工复核。"
@@ -298,8 +300,8 @@ def combined_evidence(summary, policy, web_check, posts=None):
         conclusion = (f"归档本地分析覆盖 {summary.get('total', 0)} 条记录；联网选择{scope}，已回读成功检索 {coverage.get('searched', 0)} 条。"
                       f"{len(body)} 条取得公开正文重合证据，{len(snippets)} 条仅有摘要重合线索；原创贡献仍有 {unknown} 条证据不足。"
                       "相似不能证明抄袭、作者归属或授权；未发现匹配不能证明原创。")
-    if mode == "sample10" and not local_only:
-        conclusion += " 样本结果不能推广为未选帖子或全归档的原创程度。"
+    if mode in {"sample10", "manual10"} and not local_only:
+        conclusion += " 指定帖子结果不能推广为未选帖子或全归档的原创程度。" if mode == "manual10" else " 样本结果不能推广为未选帖子或全归档的原创程度。"
     if coverage.get("execution_unknown_posts", 0):
         conclusion += f" {coverage['execution_unknown_posts']} 条已发出帖子的执行情况未知，不能推断没有消耗查询额度。"
     return {"status": status, "title": title, "conclusion": conclusion,

@@ -206,11 +206,11 @@ class PolicyChecksTests(unittest.TestCase):
         self.assertEqual(12, item["unknown_count"])
         self.assertIsNone(item["signal_percent"])
 
-    def test_sample_evidence_does_not_change_population_denominator_or_invent_probability(self):
+    def test_manual_ten_evidence_does_not_change_population_denominator_or_invent_probability(self):
         posts = normalized([{"id": str(index), "text": BODY + str(index)} for index in range(20)])
-        web = {"coverage": {"mode": "sample10", "selected_total": 10, "total_eligible": 20,
+        web = {"coverage": {"mode": "manual10", "selected_total": 10, "total_eligible": 20,
                 "requested": 1, "searched": 1, "remaining": 9, "unselected_eligible": 10,
-                "sample_method": "archive_order_evenly_spaced", "selection_search_complete": False},
+                "sample_method": "manual_x_status_links", "selection_search_complete": False},
                "posts": [{"id": "0", "status": "matched", "sources_checked": 1,
                 "matches": [{"url": "https://example.test/source", "score": 0.93,
                              "source_kind": "page_body", "page_status": "fetched", "temporal_relation": "unknown"}]}]}
@@ -218,11 +218,14 @@ class PolicyChecksTests(unittest.TestCase):
         original = row(policy, "original_contribution")
         self.assertEqual((1, 20, 5.0), (original["signal_count"], original["denominator"], original["signal_percent"]))
         self.assertEqual("not_estimated", policy["web_evidence_scope"]["projection"])
+        self.assertIn("手动链接指定的 10 条", original["interpretation"])
         combined = combined_evidence({"total": 20, "counts": {}}, policy, web, posts)
         self.assertEqual("needs_review", combined["status"])
         self.assertEqual((1, 0, 19), (combined["body_matched_posts"], combined["snippet_matched_posts"], combined["unknown_own_posts"]))
         self.assertIsNone(combined["official_probability"])
         self.assertFalse(combined["probability_recalculated"])
+        self.assertIn("手动指定的 10 条", combined["conclusion"])
+        self.assertNotIn("分散抽取", combined["conclusion"])
 
     def test_snippets_later_sources_and_same_post_never_become_strong_copying_conclusion(self):
         posts = normalized([{"id": "123456789", "text": BODY}])

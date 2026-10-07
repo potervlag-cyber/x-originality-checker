@@ -16,6 +16,8 @@
   let runPhase = 'setup';
   let runMessage = '';
   let archiveClearPromise = Promise.resolve();
+  let editingRecovery = false;
+  const linkInputs = Array.from({length: 10}, (_, index) => $(`#post-link-${index + 1}`));
 
   function clearRetainedArchive() {
     archiveClearPromise = archiveClearPromise.catch(() => {}).then(() => runtime.request('/api/archive/clear')).catch(() => {});
@@ -48,9 +50,9 @@
     $('#drop-zone').hidden = value;
     $('#processing').hidden = !value;
     $('#drop-zone').classList.remove('drag-over');
-    $('#analysis-options').hidden = value;
-    $('#run-analysis').disabled = value;
-    document.querySelectorAll('input[name="analysis-mode"], input[name="web-scope"]').forEach(input => { input.disabled = value; });
+    $('#network-toggle-row').hidden = value;
+    $('#network-enabled').disabled = value;
+    $('#run-analysis').disabled = value || webRunning;
   }
 
   function count(value) {
@@ -125,7 +127,7 @@
       return;
     }
     fragment.append(element('p', 'web-summary', `本次选中 ${count(coverage.selected_total ?? coverage.total_eligible)} 条 · 实际检索 ${count(coverage.searched)} 条 · 来源正文已核对 ${count(coverage.compared)} 条 · 失败 ${count(coverage.failed)} 条 · 所选范围尚未处理 ${count(coverage.remaining)} 条。来源证据已纳入综合结论与逐项风险说明；全网收录覆盖未知。`));
-    if (coverage.unselected_eligible > 0) fragment.append(element('p', 'web-summary', `另外 ${count(coverage.unselected_eligible)} 条可检索正文未选入本次抽样，不能根据样本推断这些帖子的原创程度。`));
+    if (coverage.unselected_eligible > 0) fragment.append(element('p', 'web-summary', `另外 ${count(coverage.unselected_eligible)} 条可检索正文未选入本次手动选择，不能根据这 10 条推断其他帖子的原创程度。`));
     if (coverage.execution_unknown_posts > 0) fragment.append(element('p', 'web-summary', `${count(coverage.execution_unknown_posts)} 条已发送但未能确认结果，记为未知；后续不会自动重复发送这些帖子。`));
     if (coverage.text_truncated_posts > 0) fragment.append(element('p', 'web-summary', `${count(coverage.text_truncated_posts)} 条正文只检索了部分文字，剩余内容未查；即使未发现相似来源也不计为完整检查。`));
     const posts = Array.isArray(report.posts) ? report.posts : [];
@@ -168,8 +170,10 @@
     $('#web-consent').disabled = value;
     $('#web-endpoint').disabled = value;
     $('#web-token').disabled = value;
-    $('#resume-setup').disabled = value;
-    $('#run-analysis').disabled = value;
+    $('#run-analysis').disabled = value || busy;
+    $('#cancel-network-setup').disabled = value;
+    $('#cancel-network-button').disabled = value;
+    linkInputs.forEach(input => { input.disabled = value; });
     $('#cancel-connection').hidden = !value || busy;
     $('#choose-file').disabled = value || busy;
     $('#change-file').disabled = value || busy;
@@ -199,8 +203,8 @@
     let dispatched = false;
     try {
       runPhase = 'connecting';
-      // Preparing locally freezes the sample even if the service is unavailable.
-      currentPlan = await runtime.request('/api/webcheck/plan', {mode: settings.scope, offset: webOffset, limit: 3, max_chars: 5000});
+      // Freeze the user's selected IDs locally before any service request.
+      currentPlan = await runtime.request('/api/webcheck/plan', {mode: settings.scope, links: settings.links, offset: webOffset, limit: 3, max_chars: 5000});
       if (ownGeneration !== generation) return;
       latestResult = await runtime.request('/api/webcheck/result');
       if (!currentPlan.posts?.length) { runPhase = 'completed'; runMessage = '所选范围没有尚待查询的可检索正文。'; return; }
@@ -212,7 +216,7 @@
         if (ownGeneration !== generation) return;
         currentPlan = plan;
         if (!plan.posts?.length) break;
-        showNetworkProgress(`正在联网查询第 ${count(webOffset + 1)}–${count(plan.next_offset)} 条 / 本次选中 ${count(plan.selected_total)} 条${settings.scope === 'sample10' ? '（分散抽样）' : ''}…`);
+        showNetworkProgress(`正在联网查询第 ${count(webOffset + 1)}–${count(plan.next_offset)} 条 / 手动指定 ${count(plan.selected_total)} 条…`);
         dispatched = true;
         const report = await client.check(plan.posts, webController.signal);
         if (ownGeneration !== generation) return;
@@ -226,7 +230,7 @@
       }
       runPhase = webController.signal.aborted ? 'cancelled' : 'completed';
       runMessage = runPhase === 'cancelled' ? '已取消后续联网查询，本地结果和已完成证据保留。'
-        : `本次${settings.scope === 'sample10' ? '抽样' : '所选范围'}查询已结束；未选、失败及证据不足的内容在报告中单独列明。`;
+        : '手动指定的 10 条查询已结束；未选、失败及证据不足的内容在报告中单独列明。';
     } catch (error) {
       if (ownGeneration !== generation) return;
       if (dispatched && currentPlan && !error?.searchNotExecuted) {
@@ -257,7 +261,7 @@
     $('#combined-description').textContent = combined.conclusion || '依据归档中的文本与材料信号判断，需结合创作过程复核。';
     const webCoverage = result.web_check?.coverage || {};
     $('#combined-coverage').textContent = runSettings?.mode === 'network'
-      ? `本地检查 ${count(summary.total)} 条记录；联网${runSettings.scope === 'sample10' ? '分散抽样' : '选择全部可检索正文'} ${count(webCoverage.selected_total ?? combined.selected_total)} / ${count(webCoverage.total_eligible ?? combined.total_eligible)} 条，实际检索 ${count(webCoverage.searched)} 条，正文相似来源 ${count(combined.body_matched_posts)} 条。${webCoverage.unselected_eligible > 0 ? `另有 ${count(webCoverage.unselected_eligible)} 条未选入联网范围。` : ''}`
+      ? `本地检查 ${count(summary.total)} 条记录；联网手动指定 ${count(webCoverage.selected_total ?? combined.selected_total)} / ${count(webCoverage.total_eligible ?? combined.total_eligible)} 条，实际检索 ${count(webCoverage.searched)} 条，正文相似来源 ${count(combined.body_matched_posts)} 条。${webCoverage.unselected_eligible > 0 ? `另有 ${count(webCoverage.unselected_eligible)} 条未选入联网范围。` : ''}`
       : '本次仅进行本地归档分析，未执行联网查重。';
     $('#combined-run-status').textContent = runMessage;
     $('#web-status').textContent = runSettings?.mode === 'network' ? runMessage : '本次选择本地分析，未进行联网查重。';
@@ -348,7 +352,7 @@
     $('#example-list').replaceChildren(exampleFragment);
 
     const scope = element('div');
-    scope.append(element('p', '', `读取 ${count(Array.isArray(coverage.post_files) ? coverage.post_files.length : coverage.post_files)} 个帖子文件；归档包含 ${count(coverage.archive_records)} 条记录，本地已检测 ${count(coverage.analyzed_posts)} 条。联网范围单独记录，不将 10 条抽样当作全归档联网检查。`));
+    scope.append(element('p', '', `读取 ${count(Array.isArray(coverage.post_files) ? coverage.post_files.length : coverage.post_files)} 个帖子文件；归档包含 ${count(coverage.archive_records)} 条记录，本地已检测 ${count(coverage.analyzed_posts)} 条。联网范围单独记录，手动指定的 10 条不代表全归档联网检查。`));
     const notes = [
       '原创通过概率是本工具根据归档信号给出的启发式参考估计，尚未用真实 X 审核样本校准，不能视为官方或经验证的实际通过率。',
       '主观参考范围用于表达材料与检查方法的不确定性，不是统计置信区间；材料缺失降低判断把握，不等于抄袭。',
@@ -362,7 +366,7 @@
   }
 
   async function inspectFiles(files) {
-    if (busy || webRunning || !files.length) return;
+    if (busy || webRunning || $('#network-dialog').open || !files.length) return;
     clearError();
     if (files.length !== 1) { showError('请一次选择一个从 X 下载的归档 ZIP。'); return; }
     const file = files[0];
@@ -371,7 +375,7 @@
     if (!file.size) { showError('这个 ZIP 是空文件，请检查下载是否完整。'); return; }
     if (!runtime?.inspectArchive) { showError('分析工具暂不可用，请刷新页面后重试。'); return; }
 
-    const selectionGeneration = ++generation;
+    ++generation;
     const replacing = !!pendingFile || !!latestResult;
     pendingFile = file;
     latestResult = null;
@@ -381,43 +385,89 @@
     runMessage = '';
     webOffset = 0;
     if (replacing) $('#web-consent').checked = false;
-    document.querySelectorAll('input[name="analysis-mode"], input[name="web-scope"]').forEach(input => { input.disabled = false; });
-    $('#resume-setup').hidden = true;
     $('#web-status').textContent = '尚未联网查重。';
     $('#results').hidden = true;
     $('.upload-card').hidden = false;
     $('#drop-zone').hidden = false;
-    $('#analysis-options').hidden = false;
-    $('#selected-file-status').hidden = false;
-    $('#selected-file-status').textContent = `已选择 ${file.name} · ${(file.size / (1024 * 1024)).toFixed(2)} MB`;
-    $('#run-analysis').hidden = false;
-    $('#run-analysis').disabled = true;
-    syncSetup();
-    await clearRetainedArchive();
-    if (generation === selectionGeneration) $('#run-analysis').disabled = false;
+    $('#network-toggle-row').hidden = false;
+    linkInputs.forEach(input => { input.value = ''; input.readOnly = false; });
+    editingRecovery = false;
+    $('#file-input').value = '';
+    clearRetainedArchive();
+    if ($('#network-enabled').checked) openNetworkDialog();
+    else await runAnalysis({mode: 'local', scope: '', consent: false});
   }
 
-  function settingsFromForm(mode = $('input[name="analysis-mode"]:checked').value, scope = $('input[name="web-scope"]:checked').value) {
-    if (mode === 'network') {
-      if (!$('#web-consent').checked) {
-        $('#web-consent').focus();
-        throw new Error('请先确认所选帖子的文字可以发送给查重服务和搜索提供商。');
+  function manualLinks() {
+    const ids = new Set();
+    return linkInputs.map((input, index) => {
+      const raw = input.value.trim();
+      let url, matched;
+      try {
+        url = new URL(raw);
+        matched = url.pathname.match(/^\/(?:[A-Za-z0-9_]{1,15}|i\/web)\/status\/([1-9][0-9]{0,29})(?:\/(?:photo|video)\/[1-9][0-9]*)?\/?$/);
+        if (!['https:', 'http:'].includes(url.protocol) || !['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com'].includes(url.hostname)
+          || url.username || url.password || url.port || !matched || raw.length > 2048 || /[\u0000-\u0020\u007f\\]/.test(raw)) throw new Error();
+      } catch {
+        input.focus();
+        throw new Error(`请在帖子 ${index + 1} 填写有效的 X 帖子链接，例如 https://x.com/用户名/status/帖子编号。`);
       }
-      const endpoint = window.OriginalityWebCheck.endpoint($('#web-endpoint').value);
-      const token = $('#web-token').value.trim();
-      if (!token && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(endpoint).hostname)) {
-        $('#web-token').focus();
-        throw new Error('请先填写服务提供者给出的访问码，再开始联网分析。');
-      }
-      return {mode, scope, endpoint, token, consent: true};
+      if (ids.has(matched[1])) { input.focus(); throw new Error(`帖子 ${index + 1} 与前面的链接重复，请选择 10 条不同的帖子。`); }
+      ids.add(matched[1]);
+      url.protocol = 'https:';
+      url.search = ''; url.hash = '';
+      return url.href;
+    });
+  }
+
+  function settingsFromForm() {
+    const links = editingRecovery ? [...runSettings.links] : manualLinks();
+    if (!$('#web-consent').checked) {
+      $('#web-consent').focus();
+      throw new Error('请先确认这 10 条帖子的文字可以发送给查重服务和搜索提供商。');
     }
-    return {mode: 'local', scope: '', consent: false};
+    let endpoint;
+    try { endpoint = window.OriginalityWebCheck.endpoint($('#web-endpoint').value); }
+    catch (error) { $('.service-settings').open = true; $('#web-endpoint').focus(); throw error; }
+    const token = $('#web-token').value.trim();
+    if (!token && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(endpoint).hostname)) {
+      $('#web-token').focus();
+      throw new Error('请填写服务提供者给出的访问码，再开始联网分析。');
+    }
+    return {mode: 'network', scope: 'manual10', links, endpoint, token, consent: true};
   }
 
-  function syncSetup() {
-    const network = $('input[name="analysis-mode"]:checked').value === 'network';
-    $('#network-setup').hidden = !network;
-    $('#run-analysis').textContent = network ? '开始分析与联网查重' : '开始本地分析';
+  function showDialogError(message) {
+    $('#dialog-error').textContent = String(message);
+    $('#dialog-error').hidden = false;
+    $('#dialog-error').scrollIntoView({block: 'nearest'});
+  }
+
+  function openNetworkDialog(message = '') {
+    $('#dialog-file').textContent = editingRecovery ? latestFilename : pendingFile?.name || '';
+    $('#network-dialog-title').textContent = editingRecovery ? '继续所选 10 条的联网查询' : '选择 10 条帖子联网查重';
+    $('#network-dialog-description').textContent = editingRecovery
+      ? '本次帖子选择已固定。可修改连接信息，继续尚未发送的查询，已发送且结果未知的帖子不会重复查询。'
+      : '粘贴此 ZIP 中的 10 条 X 帖子链接。确认后分析全部归档，并联网核对这 10 条的公开来源。';
+    $('#run-analysis').textContent = editingRecovery ? '继续查询并更新报告' : '确认并开始分析';
+    $('#dialog-error').hidden = true;
+    $('#dialog-error').textContent = '';
+    linkInputs.forEach((input, index) => {
+      input.readOnly = editingRecovery;
+      if (editingRecovery) input.value = runSettings.links[index];
+    });
+    $('#network-dialog').showModal();
+    if (message) showDialogError(message);
+    if (editingRecovery) $('#web-token').focus();
+    else linkInputs[0].focus();
+  }
+
+  function cancelNetworkSetup() {
+    if (busy || webRunning) return;
+    $('#network-dialog').close();
+    if (editingRecovery) { editingRecovery = false; return; }
+    resetToSetup();
+    $('#choose-file').focus();
   }
 
   function finishReport() {
@@ -431,10 +481,10 @@
     $('#results').scrollIntoView({block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
   }
 
-  async function runAnalysis() {
+  async function runAnalysis(settings) {
     if (busy || webRunning || !pendingFile) return;
     clearError();
-    try { runSettings = settingsFromForm(); } catch (error) { showError(error.message); return; }
+    runSettings = settings;
     const file = pendingFile;
     const ownGeneration = ++generation;
     latestResult = null;
@@ -452,6 +502,7 @@
     $('#progress-message').textContent = '正在准备分析工具…';
     $('#engine-state').textContent = '';
     setBusy(true);
+    let validatingSelection = false;
     try {
       await archiveClearPromise;
       if (generation !== ownGeneration) return;
@@ -461,6 +512,10 @@
       if (generation !== ownGeneration) return;
       latestResult = result;
       if (runSettings.mode === 'network') {
+        validatingSelection = true;
+        await runtime.request('/api/webcheck/plan', {mode: 'manual10', links: runSettings.links, offset: 0, limit: 3, max_chars: 5000});
+        if (generation !== ownGeneration) return;
+        validatingSelection = false;
         $('#cancel').textContent = '停止后续联网查询';
         await runWebCheck(runSettings);
       } else { runPhase = 'completed'; runMessage = '本地检查已完成。'; }
@@ -468,6 +523,14 @@
       finishReport();
     } catch (error) {
       if (generation !== ownGeneration) return;
+      if (validatingSelection) {
+        latestResult = null;
+        runSettings = null;
+        runPhase = 'setup';
+        setBusy(false);
+        openNetworkDialog(error?.message || '链接无法对应此归档中的可检索帖子，请修正后重试。');
+        return;
+      }
       runPhase = 'local_failed';
       showError(error?.message || '无法完成分析，请检查归档下载是否完整并重试。');
       $('#engine-state').textContent = '';
@@ -476,10 +539,10 @@
     }
   }
 
-  async function resumeWebCheck() {
+  async function resumeWebCheck(settings = runSettings) {
     if (busy || webRunning || !latestResult || runSettings?.mode !== 'network') return;
     clearError();
-    try { runSettings = settingsFromForm('network', runSettings.scope); } catch (error) { showError(error.message); return; }
+    runSettings = settings;
     const ownGeneration = generation;
     $('.upload-card').hidden = false;
     $('#results').hidden = true;
@@ -509,33 +572,38 @@
     $('#web-consent').checked = false;
     $('#results').hidden = true;
     $('.upload-card').hidden = false;
-    $('#analysis-options').hidden = false;
+    $('#network-toggle-row').hidden = false;
     $('#drop-zone').hidden = false;
-    $('#run-analysis').hidden = true;
-    $('#selected-file-status').hidden = true;
-    $('#resume-setup').hidden = true;
-    document.querySelectorAll('input[name="analysis-mode"], input[name="web-scope"]').forEach(input => { input.disabled = false; });
-    syncSetup();
+    editingRecovery = false;
+    linkInputs.forEach(input => { input.value = ''; input.readOnly = false; });
     clearError();
     clearRetainedArchive();
   }
 
   $('#choose-file').addEventListener('click', chooseFile);
   $('#change-file').addEventListener('click', () => { resetToSetup(); chooseFile(); });
-  $('#run-analysis').addEventListener('click', runAnalysis);
-  document.querySelectorAll('input[name="analysis-mode"]').forEach(input => input.addEventListener('change', syncSetup));
-  document.querySelectorAll('input[name="web-scope"]').forEach(input => input.addEventListener('change', () => { $('#web-consent').checked = false; }));
-  $('#web-start').addEventListener('click', resumeWebCheck);
-  $('#resume-setup').addEventListener('click', resumeWebCheck);
+  $('#network-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy || webRunning) return;
+    let settings;
+    try { settings = settingsFromForm(); } catch (error) { showDialogError(error.message); return; }
+    const resuming = editingRecovery;
+    $('#network-dialog').close();
+    editingRecovery = false;
+    if (resuming) await resumeWebCheck(settings);
+    else await runAnalysis(settings);
+  });
+  $('#cancel-network-setup').addEventListener('click', cancelNetworkSetup);
+  $('#cancel-network-button').addEventListener('click', cancelNetworkSetup);
+  $('#network-dialog').addEventListener('cancel', event => {
+    event.preventDefault();
+    cancelNetworkSetup();
+  });
+  $('#web-start').addEventListener('click', () => resumeWebCheck());
   $('#edit-connection').addEventListener('click', () => {
     if (busy || webRunning) return;
-    $('.upload-card').hidden = false;
-    $('#drop-zone').hidden = true;
-    $('#analysis-options').hidden = false;
-    $('#network-setup').hidden = false;
-    $('#resume-setup').hidden = false;
-    document.querySelectorAll('input[name="analysis-mode"], input[name="web-scope"]').forEach(input => { input.disabled = true; });
-    $('#web-token').focus();
+    editingRecovery = true;
+    openNetworkDialog();
   });
   $('#web-connect').addEventListener('click', async () => {
     if (busy || webRunning) return;

@@ -10,6 +10,7 @@ import binascii
 import copy
 import ipaddress
 import json
+import re
 from urllib.parse import urlsplit
 import uuid
 
@@ -102,7 +103,7 @@ def _web_check(state):
             "coverage": coverage, "posts": list(state["web_posts"].values()),
             "limitations": ["公开搜索收录和网页访问有缺口，实际全网覆盖未知；未发现匹配不能证明原创。",
                             "文字重合不能确认作者归属、授权、自转载或引用是否恰当，需人工复核。",
-                            "抽样按可检索帖子的归档顺序等距选择，不按风险排序；样本结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "sample10" else "全量联网指归档中可检索的完整非转帖正文；短帖、缺失正文、媒体和归档外内容仍未查。",
+                            "联网仅检查手动链接指定的 10 条归档正文，不抓取 X 链接、不补抽帖子；结果不能推算未选帖子或全归档的原创程度。" if state["selection_mode"] == "manual10" else "本次尚未选择联网帖子；归档本地分析不代表已检索公开来源。",
                             "批次发出后取消、超时或响应无效时，上游是否执行及费用未知；返回的零成功次数只表示未取得证据，不表示没有检索消耗。",
                             "联网检查不重算离线参考概率，也不调用 X 官方审核或检查媒体来源。"]}
 
@@ -113,23 +114,56 @@ def _current_archive():
     return _retained_archive
 
 
+def _manual_ids(links):
+    if not isinstance(links, list) or len(links) != 10:
+        raise ValueError("请完整填写 10 个不同的 X 帖子链接。")
+    ids = []
+    for index, value in enumerate(links, 1):
+        try:
+            if not isinstance(value, str) or len(value) > 2048:
+                raise ValueError
+            value = value.strip()
+            parsed = urlsplit(value)
+            if (any(ord(char) < 33 or char == "\\" or ord(char) == 127 for char in value)
+                    or parsed.scheme not in {"http", "https"}
+                    or (parsed.hostname or "").lower() not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.port not in {None, 443 if parsed.scheme == "https" else 80}):
+                raise ValueError
+            match = re.fullmatch(r"/(?:[A-Za-z0-9_]{1,15}|i/web)/status/([1-9][0-9]{0,29})(?:/(?:photo|video)/[1-9][0-9]*)?/?", parsed.path)
+            if not match:
+                raise ValueError
+            pid = match[1]
+        except (ValueError, TypeError):
+            raise ValueError(f"第 {index} 个链接不是有效的 X/twitter 数字编号帖子链接。") from None
+        if pid in ids:
+            raise ValueError(f"第 {index} 个链接与前面填写的帖子重复，请填写 10 条不同帖子。")
+        ids.append(pid)
+    return ids
+
+
 def _web_plan(data):
     state = _current_archive()
     mode = data.get("mode", state["selection_mode"])
-    if mode not in {"all", "sample10"}:
-        raise ValueError("联网范围应为全部可检索帖子或分散抽取 10 条。")
-    if mode != state["selection_mode"] and state["selection_locked"]:
-        raise ValueError("当前归档的联网范围已固定；请重新导入归档再更换范围。")
+    if mode != "manual10":
+        raise ValueError("联网分析仅支持手动填写 10 条 X 帖子链接。")
+    if len(state["eligible"]) < 10:
+        raise ValueError("归档中不足 10 条完整且可检索的非转帖正文，无法执行 10 条联网分析；仍可使用本地分析。")
     selected = state["selected"]
-    if mode != state["selection_mode"]:
-        count = min(10, len(state["eligible"]))
-        indices = [(index * (len(state["eligible"]) - 1)) // (count - 1) for index in range(count)] if count > 1 else list(range(count))
-        selected = [state["eligible"][index] for index in indices] if mode == "sample10" else state["eligible"]
+    if not state["selection_locked"] or "links" in data:
+        ids = _manual_ids(data.get("links"))
+        eligible = {post["id"]: post for post in state["eligible"]}
+        for index, pid in enumerate(ids, 1):
+            if pid not in eligible:
+                raise ValueError(f"第 {index} 个链接未匹配归档中可检索的完整非转帖正文；不会抓取链接或自动换选帖子。")
+        if state["selection_locked"] and ids != [post["id"] for post in selected]:
+            raise ValueError("当前归档的 10 条联网选择已固定；请重新导入归档后再更换链接。")
+        selected = [eligible[pid] for pid in ids]
     offset = _integer(data.get("offset", 0), "检查起点", maximum=len(selected))
     limit = _integer(data.get("limit", 10), "每批帖子数", 1, 10)
     maximum = _integer(data.get("max_chars", 5000), "每条检索文字上限", 24, 5000)
     state.update(selected=selected, selection_mode=mode, selection_locked=True,
-                 sample_method="archive_order_evenly_spaced" if mode == "sample10" else "all_eligible")
+                 sample_method="manual_x_status_links")
     posts = []
     cursor = offset
     while cursor < len(selected) and len(posts) < limit:
@@ -328,7 +362,7 @@ def finish_archive_json(media_json):
             "base_result": result,
             "eligible": [p for p in posts if p["type"] != "repost" and p["text_complete"] is True and len(_clean(p["text"])) >= 24],
             "planned": {}, "web_posts": {}}
-        _retained_archive.update(selected=_retained_archive["eligible"], selection_mode="all", sample_method="all_eligible", selection_locked=False)
+        _retained_archive.update(selected=[], selection_mode="not_selected", sample_method="not_selected", selection_locked=False)
         result["web_check"] = _web_check(_retained_archive)
         result["summary"]["combined_evidence"] = combined_evidence(result["summary"], result["policy_checks"], result["web_check"], posts)
         response = {"ok": True, "result": result}

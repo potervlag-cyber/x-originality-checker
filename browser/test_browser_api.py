@@ -38,6 +38,24 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertTrue(finished["ok"], finished)
         return finished["result"]
 
+    def web_archive(self, records):
+        # Actual extra public fixture records make strict manual10 possible;
+        # never mutate retained eligibility independently of local analysis.
+        fillers = [{"id_str": str(900000000 + index), "full_text": TEXT + f"补充公开测试记录{index}"} for index in range(10)]
+        return self.archive([*records, *fillers])
+
+    def links(self, ids=None):
+        ids = ids or [post["id"] for post in browser_api._retained_archive["eligible"][:10]]
+        return [f"https://x.com/example/status/{pid}" for pid in ids]
+
+    def plan(self, data=None):
+        payload = {"mode": "manual10", **(data or {})}
+        if browser_api._retained_archive is None:
+            return request("/api/webcheck/plan", payload)
+        if not browser_api._retained_archive["selection_locked"]:
+            payload.setdefault("links", self.links())
+        return request("/api/webcheck/plan", payload)
+
     def report(self, post_id, status="no_match", matches=None, **extra):
         return {"schema_version": 1, "provider": "fixture", "checked_at": "2026-10-07T01:00:00Z", "posts": [{
             "id": post_id, "status": status, "query_count": 2, "successful_queries": 0 if status in {"failed", "skipped"} else 2,
@@ -148,19 +166,19 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(json.loads(browser_api.prepare_archive_json('not json'))["ok"])
         self.assertIsNone(browser_api._prepared_archive)
 
-    def test_plan_uses_all_eligible_posts_in_archive_order_and_only_text_fields(self):
-        self.archive([
+    def test_manual_plan_only_emits_selected_eligible_text_fields(self):
+        self.web_archive([
             {"id_str": "123456701", "full_text": TEXT, "created_at": "2020-01-01", "screen_name": "PRIVATE_ACCOUNT", "unrelated": "PRIVATE_DATA"},
             {"id_str": "123456702", "full_text": TEXT, "retweeted_status_id_str": "9"},
             {"id_str": "123456703", "full_text": "短帖"},
             {"id_str": "123456704", "full_text": TEXT, "truncated": True},
             {"id_str": "123456705", "full_text": TEXT * 100, "in_reply_to_status_id_str": "8"},
         ])
-        first = request("/api/webcheck/plan", {"limit": 1})["result"]
-        self.assertEqual(2, first["total_eligible"])
+        first = self.plan({"limit": 1})["result"]
+        self.assertEqual(12, first["total_eligible"])
         self.assertEqual("123456701", first["posts"][0]["id"])
         self.assertFalse(first["done"])
-        last = request("/api/webcheck/plan", {"offset": first["next_offset"], "limit": 10, "max_chars": 100})["result"]
+        last = self.plan({"offset": first["next_offset"], "limit": 10, "max_chars": 100})["result"]
         self.assertEqual(first["session_id"], last["session_id"])
         self.assertTrue(last["done"])
         post = last["posts"][0]
@@ -170,13 +188,13 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(len(TEXT) * 100, post["original_chars"])
         self.assertEqual({"id", "text", "url", "created_at", "original_chars", "text_truncated"}, set(post))
         self.assertNotIn("PRIVATE", json.dumps(first))
-        for invalid in ({"offset": -1}, {"offset": 3}, {"limit": 11}, {"limit": True}, {"max_chars": 5001}, {"max_chars": 0}):
+        for invalid in ({"offset": -1}, {"offset": 11}, {"limit": 11}, {"limit": True}, {"max_chars": 5001}, {"max_chars": 0}):
             with self.subTest(invalid=invalid):
-                self.assertFalse(request("/api/webcheck/plan", invalid)["ok"])
+                self.assertFalse(self.plan(invalid)["ok"])
 
     def test_apply_merges_batches_without_reanalysis_and_reports_partial_failure(self):
-        base = self.archive([{"id_str": str(123456700 + i), "full_text": TEXT + str(i)} for i in range(3)])
-        plan = request("/api/webcheck/plan")["result"]
+        base = self.web_archive([{"id_str": str(123456700 + i), "full_text": TEXT + str(i)} for i in range(3)])
+        plan = self.plan()["result"]
         with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun full archive")):
             matched = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report(plan["posts"][0]["id"], "matched", [self.match()])})
         self.assertTrue(matched["ok"], matched)
@@ -188,7 +206,7 @@ class BrowserAdapterTests(unittest.TestCase):
         failed_report = self.report(plan["posts"][1]["id"], "failed", issues=[{"code": "provider_unavailable"}], checked_chars=0)
         failed = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": failed_report})["result"]
         coverage = failed["web_check"]["coverage"]
-        self.assertEqual((2, 1, 1, 1, 1), tuple(coverage[key] for key in ("requested", "searched", "failed", "matched", "remaining")))
+        self.assertEqual((2, 1, 1, 1, 8), tuple(coverage[key] for key in ("requested", "searched", "failed", "matched", "remaining")))
         self.assertEqual("unknown", coverage["web_coverage"])
         self.assertFalse(coverage["search_complete"])
         # Retrying a post updates its evidence, without double-counting the post.
@@ -196,12 +214,13 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(2, retry["web_check"]["coverage"]["requested"])
         self.assertEqual(0, retry["web_check"]["coverage"]["failed"])
 
-    def test_sample_ten_is_dispersed_frozen_and_keeps_local_archive_complete(self):
+    def test_manual_ten_preserves_input_order_and_freezes_ids_without_changing_local_analysis(self):
         base = self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
         self.assertEqual(31, base["summary"]["total"])
         self.assertTrue(base["summary"]["analyzed_all_archive_posts"])
-        first = request("/api/webcheck/plan", {"mode": "sample10", "limit": 3})["result"]
-        self.assertEqual((31, 10, "archive_order_evenly_spaced"),
+        ids = [str(123456700 + index) for index in (30, 3, 26, 10, 13, 16, 20, 23, 6, 0)]
+        first = self.plan({"links": self.links(ids), "limit": 3})["result"]
+        self.assertEqual((31, 10, "manual_x_status_links"),
                          (first["total_eligible"], first["selected_total"], first["sample_method"]))
         selected = []
         plan = first
@@ -209,47 +228,78 @@ class BrowserAdapterTests(unittest.TestCase):
             selected.extend(post["id"] for post in plan["posts"])
             if plan["done"]:
                 break
-            plan = request("/api/webcheck/plan", {"mode": "sample10", "offset": plan["next_offset"], "limit": 3})["result"]
-        self.assertEqual([str(123456700 + index) for index in (0, 3, 6, 10, 13, 16, 20, 23, 26, 30)], selected)
+            plan = self.plan({"offset": plan["next_offset"], "limit": 3})["result"]
+        self.assertEqual(ids, selected)
         self.assertEqual(0, plan["remaining"])
-        self.assertFalse(request("/api/webcheck/plan", {"mode": "all"})["ok"])
+        self.assertFalse(self.plan({"links": self.links(list(reversed(ids)))})["ok"])
+        self.assertFalse(self.plan({"mode": "all"})["ok"])
+        self.assertFalse(self.plan({"mode": "sample10"})["ok"])
         self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": self.report("123456701")})["ok"])
-        self.assertFalse(request("/api/webcheck/plan", {"mode": "sample10", "offset": 11})["ok"])
+        self.assertFalse(self.plan({"offset": 11})["ok"])
         self.assertEqual(31, browser_api._retained_archive["base_result"]["summary"]["total"])
+        self.assertTrue(self.plan({"links": [link.replace("x.com", "twitter.com") for link in self.links(ids)]})["ok"])
 
-    def test_small_or_empty_sample_and_invalid_selection_are_explicit(self):
-        self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(4)])
-        self.assertFalse(request("/api/webcheck/plan", {"mode": "sample10", "limit": 11})["ok"])
-        self.assertFalse(browser_api._retained_archive["selection_locked"])
-        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
-        self.assertEqual(4, plan["selected_total"])
-        self.assertEqual(4, len(plan["posts"]))
-        self.assertTrue(plan["done"])
-        self.archive([{"id_str": "123456789", "full_text": "短帖"}])
-        self.assertFalse(request("/api/webcheck/plan", {"mode": "risk10"})["ok"])
-        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
-        self.assertEqual((0, 0, []), (plan["selected_total"], plan["remaining"], plan["posts"]))
-        self.assertTrue(plan["done"])
-        self.assertFalse(request("/api/webcheck/plan", {"mode": "all"})["ok"])
+    def test_strict_ten_links_reject_invalid_duplicate_unavailable_or_ineligible_records_atomically(self):
+        self.web_archive([
+            {"id_str": "123456701", "full_text": TEXT},
+            {"id_str": "123456702", "full_text": TEXT, "retweeted_status_id_str": "9"},
+            {"id_str": "123456703", "full_text": "短帖"},
+            {"id_str": "123456704", "full_text": TEXT, "truncated": True},
+        ])
+        links = self.links()
+        invalid_links = [links[:9], links + ["https://x.com/example/status/9999"],
+            ["", *links[1:]], [None, *links[1:]],
+            ["https://x.com.attacker.example/example/status/123456701", *links[1:]],
+            ["https://user:private@example.com/example/status/123456701", *links[1:]],
+            ["http://127.0.0.1/example/status/123456701", *links[1:]],
+            ["https://x.com/example/status/not-numeric", *links[1:]],
+            ["https://x.com/example/status/123456701/extra", *links[1:]],
+            ["https://x.com/example/status/999999999", *links[1:]],
+            [links[0], links[0].replace("x.com", "twitter.com"), *links[2:]],
+        ]
+        invalid_links.extend([[f"https://x.com/example/status/{pid}", *links[1:]] for pid in ("123456702", "123456703", "123456704")])
+        for candidate in invalid_links:
+            with self.subTest(candidate=candidate):
+                self.assertFalse(self.plan({"links": candidate})["ok"])
+                self.assertFalse(browser_api._retained_archive["selection_locked"])
+                self.assertEqual([], browser_api._retained_archive["selected"])
+        self.assertFalse(self.plan({"limit": 11})["ok"])
+        self.assertFalse(request("/api/webcheck/plan", {"mode": "manual10"})["ok"])
+        self.assertFalse(request("/api/webcheck/plan")["ok"])
+        for mode in ("all", "sample10"):
+            self.assertFalse(request("/api/webcheck/plan", {"mode": mode, "links": links})["ok"])
+        valid = self.plan({"links": [links[0] + "?s=20#media", *links[1:]]})
+        self.assertTrue(valid["ok"], valid)
+        self.assertEqual(10, valid["result"]["selected_total"])
+        self.assertNotIn("?s=20", json.dumps(valid))
 
-    def test_result_readback_uses_current_selection_without_queries_or_reanalysis(self):
+    def test_archive_with_fewer_than_ten_eligible_posts_keeps_local_analysis_but_rejects_online(self):
+        for records in ([{"id_str": str(123456700 + index), "full_text": TEXT} for index in range(4)],
+                        [{"id_str": "123456789", "full_text": "短帖"}]):
+            with self.subTest(size=len(records)):
+                result = self.archive(records)
+                self.assertEqual(len(records), result["summary"]["total"])
+                rejected = self.plan()
+                self.assertFalse(rejected["ok"])
+                self.assertIn("不足 10", rejected["error"])
+                self.assertFalse(browser_api._retained_archive["selection_locked"])
+                self.assertEqual("not_selected", result["web_check"]["coverage"]["mode"])
+
+    def test_result_readback_uses_current_manual_selection_without_queries_or_reanalysis(self):
         self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
-        request("/api/webcheck/plan", {"mode": "sample10", "limit": 3})
+        self.plan({"limit": 3})
         with patch.object(browser_api, "analyze", side_effect=AssertionError("must not rerun analysis")):
             response = request("/api/webcheck/result")
         self.assertTrue(response["ok"], response)
         result = response["result"]
-        self.assertEqual(("sample10", 10, 0), (result["web_check"]["coverage"]["mode"], result["web_check"]["coverage"]["selected_total"], result["web_check"]["coverage"]["searched"]))
+        self.assertEqual(("manual10", 10, 0), (result["web_check"]["coverage"]["mode"], result["web_check"]["coverage"]["selected_total"], result["web_check"]["coverage"]["searched"]))
         self.assertEqual("incomplete", result["summary"]["combined_evidence"]["status"])
+        self.assertIn("手动指定的 10 条", result["summary"]["combined_evidence"]["conclusion"])
         self.assertEqual({}, browser_api._retained_archive["web_posts"])
-        self.archive([{"id_str": "123456789", "full_text": "短帖"}])
-        request("/api/webcheck/plan", {"mode": "sample10"})
-        result = request("/api/webcheck/result")["result"]
-        self.assertEqual(("sample10", 0, 1), (result["summary"]["combined_evidence"]["web_mode"], result["summary"]["combined_evidence"]["selected_total"], result["summary"]["combined_evidence"]["unknown_own_posts"]))
 
-    def test_completed_sample_preserves_unselected_unknowns_and_offline_probability(self):
+    def test_completed_manual_ten_preserves_unselected_unknowns_and_offline_probability(self):
         base = self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(31)])
-        plan = request("/api/webcheck/plan", {"mode": "sample10"})["result"]
+        plan = self.plan()["result"]
         report = self.report(plan["posts"][0]["id"], "matched", [self.match()])
         for post in plan["posts"][1:]:
             report["posts"].extend(self.report(post["id"], sources_checked=1)["posts"])
@@ -277,13 +327,13 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertIn("公开来源证据合并", html_report({}, result))
 
     def test_abandoned_dispatched_batch_is_unknown_and_never_replanned(self):
-        self.archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(7)])
-        plan = request("/api/webcheck/plan", {"limit": 3})["result"]
+        self.web_archive([{"id_str": str(123456700 + index), "full_text": TEXT + str(index)} for index in range(7)])
+        plan = self.plan({"limit": 3})["result"]
         ids = [post["id"] for post in plan["posts"]]
         response = request("/api/webcheck/abandon", {"session_id": plan["session_id"], "ids": ids, "reason": "response_unknown"})
         self.assertTrue(response["ok"], response)
         coverage = response["result"]["web_check"]["coverage"]
-        self.assertEqual((3, 4, 3, 0), (coverage["requested"], coverage["remaining"], coverage["execution_unknown_posts"], coverage["searched"]))
+        self.assertEqual((3, 7, 3, 0), (coverage["requested"], coverage["remaining"], coverage["execution_unknown_posts"], coverage["searched"]))
         self.assertEqual(sum(len(post["text"]) for post in plan["posts"]), coverage["unknown_execution_chars"])
         self.assertFalse(coverage["selection_search_complete"])
         for post in response["result"]["web_check"]["posts"]:
@@ -291,14 +341,14 @@ class BrowserAdapterTests(unittest.TestCase):
             self.assertEqual(0, post["checked_chars"])
             self.assertIsNone(post["max_similarity"])
             self.assertIn({"code": "batch_response_unknown"}, post["issues"])
-        resumed = request("/api/webcheck/plan", {"offset": 0, "limit": 3})["result"]
+        resumed = self.plan({"offset": 0, "limit": 3})["result"]
         self.assertEqual([str(123456700 + index) for index in (3, 4, 5)], [post["id"] for post in resumed["posts"]])
         self.assertEqual(6, resumed["next_offset"])
         self.assertIn("不表示没有检索消耗", " ".join(response["result"]["web_check"]["limitations"]))
 
     def test_abandon_requires_valid_session_ids_and_does_not_destroy_returned_evidence(self):
-        self.archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT}])
-        plan = request("/api/webcheck/plan", {"limit": 1})["result"]
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT}])
+        plan = self.plan({"limit": 1})["result"]
         good = {"session_id": plan["session_id"], "ids": ["123456789"], "reason": "cancelled"}
         for bad in ({**good, "session_id": "stale"}, {**good, "ids": ["123456790"]}, {**good, "ids": ["123456789"] * 2}, {**good, "reason": "never_sent"}):
             self.assertFalse(request("/api/webcheck/abandon", bad)["ok"])
@@ -309,8 +359,8 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(0, abandoned["web_check"]["coverage"]["execution_unknown_posts"])
 
     def test_apply_keeps_local_truncation_and_snippet_unknowns(self):
-        self.archive([{"id_str": "123456789", "full_text": TEXT * 100}])
-        plan = request("/api/webcheck/plan", {"max_chars": 100})["result"]
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT * 100}])
+        plan = self.plan({"max_chars": 100})["result"]
         match = self.match(source_kind="search_snippet", page_status="source_http_403", source_text_truncated=None, published_at=None, published_at_basis=None, temporal_relation="unknown")
         report = self.report("123456789", "partial", [match], original_chars=100, checked_chars=100, text_truncated=False, sources_checked=0, issues=[{"code": "source_http_403"}])
         result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
@@ -322,8 +372,8 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(result["result"]["web_check"]["coverage"]["search_complete"])
 
     def test_unmatched_truncated_text_is_partial_and_match_totals_are_preserved(self):
-        self.archive([{"id_str": "123456789", "full_text": TEXT * 100}])
-        plan = request("/api/webcheck/plan", {"max_chars": 100})["result"]
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT * 100}])
+        plan = self.plan({"max_chars": 100})["result"]
         report = self.report("123456789", checked_chars=100, original_chars=100, text_truncated=False)
         result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
         self.assertTrue(result["ok"], result)
@@ -333,7 +383,7 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(web["coverage"]["search_complete"])
         policy = next(row for row in result["result"]["policy_checks"]["requirements"] if row["id"] == "original_contribution")
         self.assertEqual(0, policy["assessed_count"])
-        self.assertEqual(1, policy["unknown_count"])
+        self.assertEqual(11, policy["unknown_count"])
         report = self.report("123456789", "matched", [self.match()] * 3, matches_total=5, checked_chars=100)
         result = request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})
         self.assertTrue(result["ok"], result)
@@ -343,8 +393,8 @@ class BrowserAdapterTests(unittest.TestCase):
             self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
 
     def test_unplanned_ids_stale_sessions_and_bad_evidence_do_not_mutate_state(self):
-        self.archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT + "新增"}])
-        plan = request("/api/webcheck/plan", {"limit": 1})["result"]
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}, {"id_str": "123456790", "full_text": TEXT + "新增"}])
+        plan = self.plan({"limit": 1})["result"]
         payload = {"session_id": plan["session_id"], "report": self.report("123456790")}
         self.assertFalse(request("/api/webcheck/apply", payload)["ok"])
         self.assertFalse(request("/api/webcheck/apply", {**payload, "session_id": "old-session"})["ok"])
@@ -362,20 +412,20 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertFalse(failed["ok"])
         self.assertNotIn("private error", failed["error"])
         self.assertEqual({}, browser_api._retained_archive["web_posts"])
-        self.archive([{"id_str": "123456789", "full_text": TEXT}])
-        new = request("/api/webcheck/plan")["result"]
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
+        new = self.plan()["result"]
         self.assertNotEqual(plan["session_id"], new["session_id"])
         self.assertFalse(request("/api/webcheck/apply", {"session_id": plan["session_id"], "report": report})["ok"])
 
     def test_clear_and_new_archive_failures_remove_all_retained_content(self):
-        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
         self.assertTrue(request("/api/archive/clear")["result"]["cleared"])
         self.assertIsNone(browser_api._retained_archive)
-        self.assertFalse(request("/api/webcheck/plan")["ok"])
-        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.assertFalse(self.plan()["ok"])
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
         self.assertFalse(json.loads(browser_api.prepare_archive_json("not-json"))["ok"])
         self.assertIsNone(browser_api._retained_archive)
-        self.archive([{"id_str": "123456789", "full_text": TEXT}])
+        self.web_archive([{"id_str": "123456789", "full_text": TEXT}])
         self.assertFalse(json.loads(browser_api.finish_archive_json("not-json"))["ok"])
         self.assertIsNone(browser_api._prepared_archive)
         self.assertIsNone(browser_api._retained_archive)
